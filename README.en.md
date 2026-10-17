@@ -4,11 +4,11 @@
 
 A standalone online installer for the public [ii33/coating-sim](https://github.com/ii33/coating-sim) project. The frozen installer's Python/Tcl/Tk is separate from the application runtime. Opening the EXE needs no preinstalled Python.
 
-## alpha.2
+## alpha.7
 
-Download `CoatingSimInstaller-v0.1.0-alpha.2-windows-x64.exe`, verify the matching `SHA256SUMS.txt`, and select a new target. Source defaults to CNB, with GitHub available. Tsinghua TUNA PyPI is enabled by default; explicit choices and a saved reviewed project index take precedence. No global pip configuration is changed.
+Download `CoatingSimInstaller-v0.1.0-alpha.7-windows-x64.exe`, verify the matching `SHA256SUMS.txt`, and select a new target. Source defaults to CNB, with GitHub available. Tsinghua TUNA PyPI is enabled by default; explicit choices and a saved reviewed project index take precedence. No global pip configuration is changed.
 
-After plan confirmation, the installer extracts **CPython's official NuGet Python 3.12.10 x64** to `<target>/.runtime/python`. Only this private interpreter creates `<target>/app/.venv`. It does not discover/reuse system Python, run a Python EXE/MSI installer, or change registrations/PATH. Launch using `app/launch-coating.cmd`, which references the project venv only.
+After clicking Install, the installer extracts **CPython's official NuGet Python 3.12.10 x64** to `<target>/.runtime/python`. Only this private interpreter creates `<target>/app/.venv`. It does not discover/reuse system Python, run a Python EXE/MSI installer, or change registrations/PATH. Launch using `app/launch-coating.cmd`, which references the project venv only.
 
 “Check / prepare Python” deploys or validates that project's owned runtime. An unchanged runtime is reused after its pinned file inventory is verified. Unknown existing runtimes, modified content and venvs based on external Python are preserved; choose a new target.
 
@@ -37,3 +37,11 @@ python -m PyInstaller --noconfirm --clean installer.spec
 [Bootstrap details](docs/dependency-manager-bootstrap.md) · [Private runtime policy](docs/private-python-runtime.md) · [License](LICENSE)
 
 MinGit binary downloads use the Huawei Cloud mirror first when mirrors are enabled, with official GitHub fallback. Both sources must match the same pinned official SHA-256. Choosing PyPI disables this mirror too. Project source selection is unchanged.
+
+## Changes through alpha.7
+
+The compact default interface supports one-click installation with expandable details. Update checks and updates the main application from the selected source main branch. Successful installation creates and verifies the current user desktop shortcut. Installation, update, already-current, failed and cancelled outcomes are explicit; Exit becomes available after cleanup.
+
+Git software itself (MinGit) defaults to the Huawei Cloud mirror with verified official fallback, independently of the CNB/GitHub project-source selection.
+
+[Performance evidence](docs/installation-performance.md) · [Application updates and desktop shortcuts](docs/project-update-and-desktop.md) · [Completion and exit](docs/terminal-outcomes.md)
