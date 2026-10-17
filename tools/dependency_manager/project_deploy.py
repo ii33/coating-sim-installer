@@ -25,7 +25,7 @@ from . import manager
 from .external_program import popen as external_popen
 from .external_program import run as external_run
 from .git_runtime import find_managed_git
-from .mirrors import MIRRORS, ProxyConfig, redact
+from .mirrors import MIRRORS, ProxyConfig, redact, resolve_mirror
 
 REPOSITORY = "ii33/coating-sim"
 LEGACY_REPOSITORY = "ii33/deposition-sim"
@@ -249,7 +249,7 @@ def _save_new(path, data):
 
 
 def plan_project_deployment(directory, ref="main", groups=("desktop",), backend="cpu",
-                            profile="runtime", mirror="pypi", python=None, proxy=None, *,
+                            profile="runtime", mirror=None, python=None, proxy=None, *,
                             emit=None, cancel_event=None, timeout=300,
                             source="github", repository_url=None, git_path=None):
     """Prepare a new fixed-project checkout and its ordinary dependency plan."""
@@ -271,6 +271,7 @@ def plan_project_deployment(directory, ref="main", groups=("desktop",), backend=
         groups = tuple(groups)
         if not groups or any(group not in manager.GROUPS for group in groups):
             raise ValueError("Select at least one known dependency group")
+        mirror = resolve_mirror(directory, mirror)
         if mirror not in MIRRORS:
             raise ValueError("Unknown registry mirror")
         if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not math.isfinite(timeout) or not 1 <= timeout <= 3600:

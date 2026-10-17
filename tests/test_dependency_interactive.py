@@ -12,22 +12,17 @@ from tools.dependency_manager.cli import parser
 @pytest.fixture
 def flow(monkeypatch, tmp_path):
     root = tmp_path / "install"
-    identity = {"executable": "/python", "python": "3.12.9", "implementation": "CPython"}
+    identity = {"executable": "/python", "python": "3.12.10", "implementation": "CPython", "valid": True, "base_prefix": str(root / ".runtime/python")}
     calls = {}
     values = {
-        "discover_python": {
-            "status": "ready",
-            "selected_python": "/python",
-            "candidates": [{"path": "/python", "identity": identity}],
-        },
         "discover_git": "/git",
         "recommend_environment": {"status": "success", "selected_backend": "cpu"},
         "plan_project_deployment": {"status": "ready", "plan_id": "source"},
         "plan_environment": {"status": "ready", "plan_id": "dependencies"},
         "execute_project_deployment": {"status": "success"},
         "execute_plan": {"status": "success"},
-        "plan_runtime": {"status": "ready", "plan_id": "python"},
-        "execute_runtime": {"status": "success", "python": "/python"},
+        "plan_runtime": {"status": "ready", "action": "reuse", "plan_id": "python"},
+        "execute_runtime": {"status": "success", "python": "/python", "identity": identity},
         "plan_git_runtime": {"status": "ready", "plan_id": "git"},
         "execute_git_runtime": {"status": "completed", "git": "/git"},
         "inspect_environment": {"status": "success", "target": identity},
@@ -99,7 +94,7 @@ def test_default_cnb_full_runtime_one_install_confirmation(flow):
     assert plan.kwargs["repository_url"] == subject.CNB_URL
     assert plan.kwargs["groups"] == ("desktop", "appearance")
     assert plan.kwargs["profile"] == "runtime"
-    assert plan.kwargs["mirror"] == "pypi"
+    assert plan.kwargs["mirror"] == "tuna"
     calls["execute_project_deployment"].assert_called_once()
 
 
@@ -192,7 +187,7 @@ def test_unrelated_app_is_rejected_without_discovery_or_writes(flow):
     root, calls, run = flow
     (root / "app").mkdir(parents=True)
     assert run([""]) == 2
-    calls["discover_python"].assert_not_called()
+    calls["plan_runtime"].assert_not_called()
 
 
 def test_declined_plan_never_installs_dependencies(flow):
@@ -210,7 +205,7 @@ def test_network_failure_never_executes_plan(flow):
 
 def test_python_install_confirmation_and_project_boundary(flow):
     root, calls, run = flow
-    calls["discover_python"].side_effect = [{"status": "missing", "selected_python": None}, calls["discover_python"].return_value]
+    calls["plan_runtime"].return_value["action"] = "extract"
     assert run(["", "", "", "", "y", "y"]) == 0
     assert calls["plan_runtime"].call_args.kwargs["project"] == root
     calls["execute_runtime"].assert_called_once()
@@ -236,11 +231,7 @@ def test_ctrl_c_returns_cancelled_without_installing(flow):
 
 def test_missing_python_never_starts_source_or_dependency_install(flow):
     root, calls, run = flow
-    calls["discover_python"].return_value = {
-        "status": "missing",
-        "selected_python": None,
-        "candidates": [],
-    }
+    calls["plan_runtime"].return_value = {"status": "blocked", "errors": ["unsupported private target"]}
     assert run(["", "", "", "", ""]) == 2
     calls["plan_project_deployment"].assert_not_called()
     calls["execute_plan"].assert_not_called()
@@ -282,8 +273,8 @@ def test_existing_venv_uses_compatible_compute_recommendation_without_python_rep
     }
     assert run(["", "", "", "", "y"]) == 0
     plan = calls["plan_environment"].call_args.args
-    assert plan[3] == "cuda12" and plan[6] is None
-    calls["discover_python"].assert_not_called()
+    assert plan[3] == "cuda12" and plan[6] == "/python"
+    calls["execute_runtime"].assert_called_once()
 
 
 def test_launch_script_creation_is_included_and_existing_files_are_preserved(flow):

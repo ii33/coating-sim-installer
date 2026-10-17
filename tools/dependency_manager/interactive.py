@@ -14,10 +14,9 @@ from .compute_recommendation import END_USER_GROUPS, recommend_environment
 from .git_runtime import discover_git, execute_git_runtime, plan_git_runtime
 from .launchers import execute_launch_entries, plan_launch_entries
 from .manager import execute_plan, inspect_environment, plan_environment
-from .mirrors import MIRRORS, ProxyConfig, redact
+from .mirrors import MIRRORS, ProxyConfig, redact, resolve_mirror
 from .project_deploy import execute_project_deployment, plan_project_deployment
-from .python_discovery import discover_python
-from .runtime import execute_runtime, plan_runtime
+from .runtime import default_runtime_directory, execute_runtime, plan_runtime
 from .runtime_paths import unlinked_local_path
 
 CNB_URL = "https://cnb.cool/nonereason/coating-sim"
@@ -44,7 +43,7 @@ def project_directory(root):
 
 def run_interactive(
     project=None, *, input_fn=input, output=print, cancel_event=None,
-    prompt_fn=None, phase_fn=None, plan_fn=None,
+    prompt_fn=None, phase_fn=None, plan_fn=None, mirror=None,
 ):
     cancel = cancel_event or threading.Event()
     proxy = ProxyConfig("env")
@@ -176,59 +175,38 @@ def run_interactive(
         if source not in ("1", "2"):
             raise ValueError("源码来源请输入 1 或 2")
         provider = "cnb" if source == "1" else "github"
-        mirror = "tuna" if yes("启用镜像加速（仅清华 PyPI，不改 Git URL）？", "mirror") else "pypi"
+        selected = resolve_mirror(root, mirror)
+        enabled = ask("启用镜像加速（包索引 + Python 完整安装包；不改 Git URL）？ "
+                      + ("[Y/n]：" if selected != "pypi" else "[y/N]："),
+                      "y" if selected != "pypi" else "n", "mirror").lower() in ("y", "yes", "是")
+        mirror = (selected if selected != "pypi" else "tuna") if enabled else "pypi"
         profile = "development" if yes("安装开发环境（含测试与静态检查工具）？", "development") else "runtime"
         say(
             f"安装目录：{root}\n源码：{app}\n依赖环境：{app / '.venv'}\n镜像：{MIRRORS[mirror]['url']}"
         )
         existing = (app / ".venv").exists() or (app / ".venv").is_symlink()
-        python, identity = None, None
+        phase("python")
+        plan = plan_runtime(backend="cpu", proxy=proxy, project=root, runtime_mirror=mirror != "pypi")
+        show(plan)
+        if plan.get("status") != "ready":
+            return 2
+        if plan.get("action") != "reuse" and not yes(
+            "确认上述官方 NuGet/镜像、固定 SHA256、许可后解压项目私有 Python？不使用系统 Python。",
+            "python",
+        ):
+            return 130
+        result = operation(execute_runtime, plan, True, emit, cancel, proxy)
+        if not success(result):
+            return 130 if cancel.is_set() else 2
+        python, identity = result["python"], result["identity"]
         if existing:
+            # Only inspect the chosen project environment, never external Python.
             inspected = inspect_environment(app, app / ".venv", END_USER_GROUPS, "cpu", profile)
-            identity = inspected.get("target")
-            say("已有 venv 将保持原解释器；创建用 Python 不会替换它。")
-        else:
-            phase("python")
-            found = discover_python("directml" if sys.platform == "win32" else "cpu", project=root, cancel_event=cancel, preferred_minor="3.12")
-            if found.get("status") == "cancelled":
-                raise KeyboardInterrupt
-            python = found.get("selected_python")
-            identity = next(
-                (
-                    row.get("identity")
-                    for row in found.get("candidates", [])
-                    if row["path"] == python
-                ),
-                None,
-            )
-            say("已有 Python：" + (python or "未发现兼容解释器"))
-            plan = plan_runtime(backend="cpu", proxy=proxy, project=root)
-            if plan.get("status") == "ready":
-                show(plan)
-            elif not python:
-                show(plan)
-            if not python and plan.get("status") == "ready" and yes(
-                "确认上述官方来源、SHA256、目录与许可，安装独立 Python？已有兼容 Python 可跳过",
-                "python",
-            ):
-                result = operation(execute_runtime, plan, True, emit, cancel, proxy)
-                if not success(result):
-                    return 130 if cancel.is_set() else 2
-                python = result["python"]
-                found = discover_python("cpu", explicit=python, project=root, cancel_event=cancel)
-                identity = next(
-                    (
-                        row.get("identity")
-                        for row in found.get("candidates", [])
-                        if row["path"] == python
-                    ),
-                    None,
-                )
-            if not python:
-                say(
-                    "请先安装官方完整 CPython（含 venv/pip），再运行本脚本。Linux/macOS 本工具不自动修改系统包或安全设置。https://www.python.org/downloads/"
-                )
+            target = inspected.get("target") or {}
+            if not target.get("valid") or Path(target.get("base_prefix", "")).resolve() != default_runtime_directory(root).resolve():
+                say("现有 .venv 不属于本项目私有 Python，保留原环境；请选择新的安装目录。")
                 return 2
+            identity = target
         phase("recommend")
         recommendation = recommend_environment(identity, cancel_event=cancel, proxy=proxy)
         if cancel.is_set() or recommendation.get("status") == "cancelled":

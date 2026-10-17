@@ -18,7 +18,7 @@ from .manager import (
     inspect_environment,
     plan_environment,
 )
-from .mirrors import MIRRORS, ProxyConfig, benchmark_mirrors, redact
+from .mirrors import MIRRORS, ProxyConfig, benchmark_mirrors, redact, resolve_mirror
 from .project_deploy import (
     execute_project_deployment,
     plan_project_deployment,
@@ -79,7 +79,8 @@ def parser():
         help="运行依赖配置：runtime不含开发工具；development另含pytest/mpmath/Ruff/mypy",
     )
     result.add_argument("--backend", choices=BACKENDS, default="cpu")
-    result.add_argument("--mirror", choices=tuple(MIRRORS), default="pypi")
+    result.add_argument("--mirror", choices=tuple(MIRRORS), default=None,
+                        help="Package index: existing project choice or TUNA by default; pypi selects official sources")
     result.add_argument("--mirrors", help="测速镜像ID，逗号分隔；默认全部")
     result.add_argument("--proxy-mode", choices=("none", "env", "http"), default="env")
     result.add_argument(
@@ -231,11 +232,11 @@ def main(argv=None):
     if args.operation == "gui":
         from .gui import run_gui
 
-        return run_gui(args.project)
+        return run_gui(args.project, mirror=args.mirror)
     if args.operation == "interactive":
         from .interactive import run_interactive
 
-        return run_interactive(args.project)
+        return run_interactive(args.project, mirror=args.mirror)
     if args.operation == "doctor":
         try:
             import ensurepip
@@ -397,7 +398,8 @@ def main(argv=None):
                 )
             )
         elif args.operation.startswith("runtime-"):
-            plan = plan_runtime(args.runtime_dir, args.backend, proxy, project=args.project)
+            plan = plan_runtime(args.runtime_dir, args.backend, proxy, project=args.project,
+                                runtime_mirror=resolve_mirror(args.project, args.mirror) != "pypi")
             result = (
                 plan
                 if args.operation == "runtime-plan"

@@ -19,7 +19,7 @@ from typing import Any
 from .external_program import clean_frozen_environment
 from .external_program import popen as external_popen
 from .external_program import run as external_run
-from .mirrors import MIRRORS, ProxyConfig, redact
+from .mirrors import MIRRORS, ProxyConfig, redact, resolve_mirror
 
 SCHEMA_VERSION = 1
 GROUPS = {
@@ -483,12 +483,13 @@ def plan_environment(
     venv=None,
     groups=("desktop",),
     backend="cpu",
-    mirror="pypi",
+    mirror=None,
     action="repair",
     python=None,
     proxy=None,
     profile="runtime",
 ):
+    mirror = resolve_mirror(root, mirror)
     if action not in ("install", "repair") or mirror not in MIRRORS:
         raise ValueError("Unknown action or registry mirror")
     proxy = proxy or ProxyConfig()
@@ -583,7 +584,7 @@ def plan_environment(
                 result["actions"].append(
                     {
                         "kind": "create_venv",
-                        "argv": [str(python), "-I", "-m", "venv", target["venv"]],
+                        "argv": [str(python), "-I", "-B", "-m", "venv", target["venv"]],
                     }
                 )
             except (ValueError, OSError, subprocess.SubprocessError) as exc:
@@ -941,6 +942,10 @@ def execute_plan(plan, confirmed=False, emit=None, cancel_event=None, proxy=None
                     "cancelled" if cancel_event.is_set() or code == 130 else "failed"
                 )
                 result["errors"].append(f"{action['kind']} returned {code}")
+                if plan["mirror"] != "pypi" and action["kind"] in ("resolve_wheels", "pip_install"):
+                    result["warnings"].append(
+                        "Package mirror failed; inspect the error and create a fresh plan with --mirror pypi "
+                        "to use official PyPI. No automatic index switch or global pip change was made.")
                 result["warnings"].append(
                     "Environment may be partially changed; reinspect and confirm a fresh retry plan"
                 )

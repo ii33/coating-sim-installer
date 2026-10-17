@@ -1,6 +1,5 @@
 """Managed runtimes follow the selected project without global relocation."""
 from pathlib import Path
-from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -74,27 +73,13 @@ def prepared_runtime(tmp_path, monkeypatch):
     return plan
 
 
-@pytest.mark.parametrize("state,retained", [
-    ({"started": True, "completed": False, "stopped": True}, True),
-    ({"started": True, "completed": False, "stopped": False}, True),
-    ({"started": False, "completed": False, "stopped": True}, False),
-    ({"started": True, "completed": True, "stopped": False}, False),
-])
-def test_installer_resources_retained_only_on_uncertain_lifecycle(tmp_path, monkeypatch, state, retained):
+def test_failed_private_archive_cleans_only_owned_temporary_files(tmp_path, monkeypatch):
     plan = prepared_runtime(tmp_path, monkeypatch)
-    captured: dict[str, Any] = {}
-    def run(argv, *args, outcome, temporary_directory, **kwargs):
-        outcome.update(state)
-        captured.update(argv=argv, temporary=temporary_directory)
-        return 130 if state["stopped"] else 1603
-    monkeypatch.setattr(runtime, "run_command", run)
+    monkeypatch.setattr(runtime, "run_command", lambda *a, **k: pytest.fail("no EXE/MSI invocation"))
     result = runtime.execute_runtime(plan, confirmed=True)
-    assert (tmp_path / ".runtime/runtime-install.lock").exists() is retained
-    assert captured["temporary"].exists() is retained
-    assert captured["temporary"].is_relative_to(tmp_path)
-    assert captured["argv"][1:3] == ["/log", result["installer_log"]]
-    assert Path(result["installer_log"]).is_relative_to(tmp_path)
-    assert bool(result.get("retained_download")) is retained
+    assert result["status"] == "failed"
+    assert not (tmp_path / ".runtime/runtime-install.lock").exists()
+    assert not list((tmp_path / ".runtime").glob("coat-runtime-*"))
 
 
 def test_shared_bootstrap_lock_blocks_python_installer(tmp_path, monkeypatch):
@@ -112,13 +97,10 @@ def test_shared_bootstrap_lock_blocks_python_installer(tmp_path, monkeypatch):
 
 def test_registry_change_during_download_prevents_execution(tmp_path, monkeypatch):
     plan = prepared_runtime(tmp_path, monkeypatch)
-    def download(artifact, path, *args):
-        path.write_bytes(b"fixture")
-        monkeypatch.setattr(runtime, "_registered_python_paths", lambda version: [""])
-    monkeypatch.setattr(runtime, "download_runtime", download)
-    monkeypatch.setattr(runtime, "run_command", lambda *a, **k: pytest.fail("must not start"))
+    monkeypatch.setattr(runtime, "_registered_python_paths", lambda *a: pytest.fail("no registry scan"))
+    monkeypatch.setattr(runtime, "run_command", lambda *a, **k: pytest.fail("no MSI invocation"))
     result = runtime.execute_runtime(plan, confirmed=True)
-    assert "registration appeared" in result["errors"][0]
+    assert result["status"] == "failed" and "SHA-256" in result["errors"][0]
     assert not list((tmp_path / ".runtime").glob("coat-runtime-*"))
 
 

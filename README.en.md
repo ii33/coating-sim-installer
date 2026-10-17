@@ -1,35 +1,30 @@
 # Coating Sim Installer
 
-The managed application fallback is Python3.12.10, the last conventional official Windows full installer, not the latest security patch. A newer existing compatible full3.12 interpreter is preferred.
-
-Unreleased source candidate: Windows default DirectML, Python3.12 application
-preparation and hardware-aware CUDA12/13 dependency selection. See the
-[policy, verification boundaries and official sources](docs/hardware-cuda-selection.md).
-The published alpha.1 executable does not contain these candidate changes.
-
 [中文](README.md) · [Windows x64 releases](https://github.com/ii33/coating-sim-installer/releases)
 
-A standalone Tk online installer for the public [ii33/coating-sim](https://github.com/ii33/coating-sim) project. This repository contains installer code and public resources only, not the simulation application or its datasets.
+A standalone online installer for the public [ii33/coating-sim](https://github.com/ii33/coating-sim) project. The frozen installer's Python/Tcl/Tk is separate from the application runtime. Opening the EXE needs no preinstalled Python.
 
-## Run
+## alpha.2
 
-Download the single-file Windows x64 EXE and verify its `SHA256SUMS.txt`. The installer includes its own Python/Tcl/Tk runtime, so opening it does not require preinstalled Python. Choose a target directory, source (CNB by default, or GitHub), optional mirror acceleration and optional development tools. Review each complete plan before confirming.
+Download `CoatingSimInstaller-v0.1.0-alpha.2-windows-x64.exe`, verify the matching `SHA256SUMS.txt`, and select a new target. Source defaults to CNB, with GitHub available. Tsinghua TUNA PyPI is enabled by default; explicit choices and a saved reviewed project index take precedence. No global pip configuration is changed.
 
-“Check / prepare Python” reuses a compatible normal CPython instead of invoking another installer of an already-registered minor version. Unusable registrations remain blocked with the actual reason. Project dependencies go into `<target>/app/.venv`; the frozen installer runtime is never passed to `-m venv`. Existing Python, unknown directories and modified project files are preserved. Launch scripts and optional non-overwriting shortcuts retain the original icon.
+After plan confirmation, the installer extracts **CPython's official NuGet Python 3.12.10 x64** to `<target>/.runtime/python`. Only this private interpreter creates `<target>/app/.venv`. It does not discover/reuse system Python, run a Python EXE/MSI installer, or change registrations/PATH. Launch using `app/launch-coating.cmd`, which references the project venv only.
 
-Mutable project files, downloads and logs use the selected target. The default is `%LOCALAPPDATA%\CoatingSim`. The onefile extraction directory is reserved for bundled resources and is rejected as an installation/diagnostic target. Official CPython installation may create normal per-user registration and maintenance records.
+“Check / prepare Python” deploys or validates that project's owned runtime. An unchanged runtime is reused after its pinned file inventory is verified. Unknown existing runtimes, modified content and venvs based on external Python are preserved; choose a new target.
 
-## Updates
+## Downloads and compatibility
 
-Read-only checks report installed/latest versions, sources and availability separately for the installer and the project. Installer channels are `stable` and `preview`; comparison follows semantic version precedence, including numeric prerelease identifiers. Offline, timeouts, API rate limits and missing releases are explicit outcomes.
+Runtime mirrors are distinct from package indexes. Acceleration uses the verified Huawei Cloud NuGet mirror, then safely falls back to official NuGet on download/verification failure. Both must match the same pinned official-package SHA256. TLS remains enabled. Downloads may continue past 180 seconds while receiving bytes: connection/header waits are bounded at 10 seconds and no-data body reads at 15 seconds, with at most two fresh attempts per source and cancellable backoff. Size, archive-path and expanded-size guards remain; publication occurs atomically after verification.
 
-An available installer update enables a button that opens the validated official Release page only after a click. Verify the new EXE's published SHA256; no background download, in-place replacement or running-binary overwrite occurs. Project checks never fetch, checkout or overwrite dirty worktrees. Date-based project previews are compared numerically; different commits at an identical version are not interpreted as an upgrade. CNB version text is verified only using the identical public GitHub commit, with unknown reported when unavailable.
+TUNA is the default package index. Use CLI `--mirror pypi` for official sources or `--mirror ustc` for USTC. A package-index failure is reported and requires a fresh reviewed plan; indexes are never silently mixed.
+
+Windows desktop uses Python 3.12 x64 with `torch-directml==0.2.5.dev240914` and its `torch==2.4.1` constraint. CUDA12/13 is chosen by device, driver and wheel compatibility; unavailable acceleration retains CPU. Minimal numerical probes do not establish full simulation, precision or performance qualification. See the [hardware policy](docs/hardware-cuda-selection.md).
+
+Limitations: private deployment currently supports Windows x64 only. Pinned Python3.12.10 is not the newest3.12 security patch. The official NuGet package includes venv/pip but no Tcl/Tk; the packaged installer includes its own GUI runtime and the application uses Qt. Source GUI may explicitly select a Tcl/Tk interpreter solely to host the front end; the application still gets private Python.
 
 ## Source and build
 
-The original GUI and terminal bat/sh entries remain available. Source GUI needs normal CPython 3.10–3.13 with Tcl/Tk. Windows bat uses PowerShell 5.1 without altering execution policy.
-
-With a new build venv on Windows x64 / full CPython 3.13:
+`install.bat` uses native PowerShell5.1+ without changing execution policy. Without Python it downloads a private NuGet runtime; it does not auto-discover external interpreters. Linux/macOS manual CLI inspection remains, but automatic private runtime deployment is unsupported.
 
 ```text
 python -m pip install -r requirements-build.txt
@@ -37,10 +32,6 @@ python -m pytest -q
 python -m PyInstaller --noconfirm --clean installer.spec
 ```
 
-Dependencies are pinned in `requirements-build-lock.txt`. Use `--self-check --self-check-output <absolute JSON path>` for an offline executable/Tk/resource check; `--smoke-gui` briefly opens the UI without installing. Explicit developer mode `--verify-venv <new path> --python <normal CPython> --self-check-output <JSON>` creates a no-pip isolated venv only, without network or project packages.
+`--self-check` and `--smoke-gui` are offline native diagnostics. Downloads, temporary deployment files and logs stay under the selected target. Diagnostic output must remain outside the onefile extraction directory. alpha.1 release files remain intact.
 
-This unsigned alpha has targeted offline regression and native onefile startup checks. These do not establish a clean zero-Python end-to-end installation, cancellation/recovery, or scientific computation acceptance; the earlier failed Sandbox run is not counted as a pass.
-
-## License
-
-Installer code is MIT; original public copyright notices are retained. Bundled CPython, Tcl/Tk, OpenSSL and PyInstaller notices, including the bootloader exception, are included under `tools/dependency_manager/licenses`. Their respective licenses continue to apply.
+[Bootstrap details](docs/dependency-manager-bootstrap.md) · [Private runtime policy](docs/private-python-runtime.md) · [License](LICENSE)

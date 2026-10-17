@@ -1,23 +1,8 @@
-# Hardware-aware dependencies (unreleased candidate)
+# Hardware-aware dependencies (alpha.2)
 
-Published alpha.1 is unchanged. Dependency selection is separate from application
-compute preferences and from each module's actual numerical acceptance.
+Application Python is always the project-private official CPython NuGet3.12.10 x64. No system-Python discovery/reuse or EXE/MSI maintenance occurs. See [private runtime policy](private-python-runtime.md). The frozen installer runtime is independent.
 
-Windows desktop installs `torch-directml==0.2.5.dev240914` by default alongside
-CPU or CuPy CUDA dependencies. It pins Torch2.4.1/torchvision0.19.1; modern CUDA
-Torch is manual-only in a separate environment. Existing incompatible Torch or
-CuPy distributions block installation rather than being silently replaced.
-Linux/macOS desktop defaults skip DirectML and explain the platform restriction.
-
-Prefer an existing full CPython3.12 base interpreter; compatible existing
-3.10/3.11 remain usable. Default Windows DirectML rejects Python3.13 and preserves
-the existing venv, with instructions to choose a new installation directory.
-The managed application download is official **3.12.10**, the last conventional
-Windows full installer in this series, not the latest 3.12 security patch. Prefer
-a newer compatible complete3.12 already installed when available. The frozen
-installer runtime may remain3.13. Same-minor registration guards remain active:
-reuse a compatible registered interpreter; never remove registrations or run
-maintenance over an existing installation. Stale registrations remain blockers.
+Windows desktop includes torch-directml0.2.5.dev240914 with torch2.4.1. TUNA is the default package index; explicit or reviewed saved project choices take precedence. Optional accelerator failure retains CPU. Python3.12.10 is not the newest3.12 security patch. alpha.1 assets remain unchanged. Minimal probes are not full numerical or performance qualification.
 
 ## Reviewed CUDA profiles
 

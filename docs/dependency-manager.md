@@ -1,165 +1,23 @@
-# 交互式在线安装器与高级依赖 CLI
+# Project-private Python runtime (alpha.2)
 
-当前为开发源码，新交互安装流程尚未完成 Windows 原生端到端验收，不是正式 Release。本仓库同时提供独立单文件 EXE 和保留的终端/Tk 源码入口。安装器自身仅使用 Python 标准库，不导入 `coat_sim`、Qt、NumPy 或目标环境的包；不要求安装第三方 Python 包。
+The CPython [official Windows documentation](https://docs.python.org/3.12/using/windows.html#the-nuget-org-packages) describes the NuGet distribution. alpha.2 pins [Python3.12.10 x64](https://www.nuget.org/packages/python/3.12.10), authored by Python Software Foundation, rather than invoking a Windows installer.
 
-## 推荐入口与选择
+Official package: `https://api.nuget.org/v3-flatcontainer/python/3.12.10/python.3.12.10.nupkg`.
 
-- Windows 终端：双击 `install.bat` 或运行 `dependency_manager.cmd`。两者默认都是终端交互安装器；不要求预装 Python、Git 或 PowerShell 7，使用系统 Windows PowerShell 5.1。脚本策略或签名阻止执行时明确退出，不绕过策略。
-- Windows GUI：双击 `install-gui.bat` 或运行 `dependency_manager.cmd -Gui`。该入口要求 Tcl/Tk；若缺少合格 Python，会通过现有 hash 固定的官方 CPython bootstrap 安装带 Tcl/Tk 的运行时。
-- Linux/macOS 终端：运行 `sh install.sh`。无 Python 时只给出官方安装指引，不自动修改系统包。
-- Linux/macOS GUI：运行 `sh install-gui.sh`；要求已有 CPython 3.10–3.13 和可工作的 Tcl/Tk，否则提示安装带 Tk 的 Python。
-- 已有合用 Python：运行 `python dependency_manager.py` 进入终端交互，或 `python dependency_manager.py gui` 进入 GUI。`-Cli` 和 `-Gui` 不能同时使用。
+Verified mirror: `https://mirrors.huaweicloud.com/artifactory/api/nuget/v3/nuget-remote/python/3.12.10/python.3.12.10.nupkg`. This URL was resolved from the mirror's [NuGet service index](https://mirrors.huaweicloud.com/repository/nuget/v3/index.json), then the entire package was compared with official bytes.
 
-终端交互和 GUI 都询问安装目录、源码（CNB 默认或 GitHub）、是否安装 Python、是否安装项目依赖、是否镜像加速（默认否）、是否开发环境（默认否）。Python 与项目依赖安装分别确认。GUI 采用队列执行阻塞工作，界面用 `after` 定期刷新进度、日志和结果；取消请求会进入待确认状态，只有 worker 完成自己的清理后才解除。关闭窗口会等待该窗口自己的 worker 清理。生成启动入口属于短事务，不会因通用取消请求而被立即中断。
+Size 14,515,433 bytes. SHA256 `0eb85c2dfccccf1b17352de4c397f69194035b7d37149eacc16f1147d93de3b8`; the official NuGet catalog SHA512 also matched. The runtime inventory contains 1,322 files and its canonical digest is pinned in `runtime_manifest.json`. PSF/license and provenance are retained in `tools/dependency_manager/licenses`.
 
-准备新源码时，GUI 先将源码写入所选根目录下的 `app/`，再展示依赖计划并等待确认后安装依赖。若根目录本身或其 `app/` 已是合法项目，则复用该源码与现有 venv，只处理依赖，不覆盖源码或替换现有解释器。未知内容不覆盖，不删除无关文件。
+Deployment extracts only the package's `tools/` subtree. Preflight rejects traversal, absolute/drive/ADS paths, Windows reserved aliases, links, duplicate names and excessive members/sizes. Streaming extraction enforces actual member lengths and cancellation. A staging directory is verified before rename. No EXE/MSI, registration, PATH mutation, external Python discovery or system prerequisite scan occurs. If the verified interpreter cannot run, the post-deployment error is reported.
 
-默认 CNB 为 `https://cnb.cool/nonereason/coating-sim`；也可选择公开 GitHub `https://github.com/ii33/coating-sim`。镜像加速选择清华 TUNA PyPI，只改变包源，不改变 Git URL。完整用户依赖选择 `desktop + appearance`；开发模式额外加入测试和静态检查工具。计算建议与 Python 版本必须兼容；检测到设备或安装包不表示驱动、数值与完整算法已经验收。
+An ownership marker records the trusted per-file inventory. Reentry checks its digest against the pinned manifest and verifies original files; unknown/changed content is preserved. Interpreter identity, venv/ensurepip and private prefix are verified. Existing project venvs must belong to this runtime; foreign venvs are preserved. No environment is moved or copied.
 
-新安装布局：安装根目录下 `.runtime/python`、`.runtime/git`，源码 `app/`，依赖 `app/.venv`。最终确认包含创建 `app/launch-coating.cmd` 或 `.sh`，不覆盖已有同名文件，也不默认创建桌面快捷方式。安装后对真实 `.venv` 做有界 GPU 数值验证；安装成功与 GPU 可用分别报告，失败提示 CPU 方案，不自动修改驱动或重装。详细脱敏日志保存在安装根目录 `.dependency-manager/logs`。
+Python download policy:10s connection/headers,15s no-data body reads, no180s total cutoff, at most2 attempts per source, fresh partial file per attempt, cancellable retry delay. A blocked read observes cancellation on return or within its configured socket bound. Both header and actual bytes are capped at128MiB; expanded data at256MiB. A complete pinned SHA256 is mandatory before atomic no-overwrite publication. Authentication/query strings are redacted from diagnostics.
 
-Windows 官方完整 Python 安装器可能在项目根目录外写入维护缓存及每用户注册/卸载记录；项目内安装不等于完全便携、零系统痕迹。安装超时或子进程终止不确定时保留锁、下载及恢复材料供人工检查，不自动重试或删除部分安装。详见[引导说明](dependency-manager-bootstrap.md)。
+TUNA is the default PyPI index. Runtime acceleration uses the Huawei NuGet mirror independently. Disable acceleration/`--mirror pypi` to use official sources. A mirror cannot replace or supply a new expected hash. TLS validation is never disabled.
 
-## 高级 CLI 与目标保护
+Windows DirectML uses private CPython3.12 x64, torch-directml0.2.5.dev240914 and torch2.4.1. CUDA selection is separate and does not upgrade the DirectML torch dependency. CPU remains available when a GPU probe fails.
 
-```sh
-python dependency_manager.py doctor --json
-python dependency_manager.py inspect --groups desktop,appearance --json
-python -S dependency_manager.py inspect --json
-```
+Python3.12.10 is not the latest security patch. NuGet omits Tcl/Tk: use the frozen installer for its bundled GUI, or an explicitly selected Tcl/Tk source-front-end host. The Qt application uses its own venv. Private runtime support is Windows x64; no universal GPU/performance claim is made.
 
-CLI 仍支持检查、计划、安装/修复、镜像测速、运行时、源码部署和启动入口。`dependency_manager.cmd -Cli` 无操作参数时只检查；高级 CLI 的默认组与交互式完整用户组分别定义，不应互相推断。
-
-默认依赖目标为项目 `.venv`；`--venv` 可明确选择其他隔离 venv。系统 Python、含 system-site-packages 的环境、链接目标或身份不一致的解释器不可作为安装目标。现存非 venv 或损坏环境不覆盖、不自动重建；保留原目录并选择新的目标。缺 pip 的有效 venv 可通过 repair/ensurepip 修复。
-
-## 依赖组和计划
-
-- `cpu`：真实运行声明中的 NumPy、SciPy、Matplotlib、Pillow、Pydantic
-- `gui`：PySide6-Essentials/Addons，并带 CPU 组
-- `assistant`：MCP/助手/代理支持，并带 CPU 组
-- `interchange`：keyring、ezdxf、openpyxl，并带 CPU 组
-- `desktop`：以上四个运行组，覆盖 requirements.txt 的 15 项直接依赖
-- `appearance`：CPU 组 + requirements-test.txt 中 Mitsuba/DrJit 精确配对
-- `test`：CPU 组 + pytest/mpmath；独立选择 appearance 获取真实渲染测试依赖
-- `sandbox`：requirements-sandbox.txt 的 pygal/importlib-metadata/zipp 精确 pin
-
-版本检查依据项目 specifier；pin 不符显示 conflict，即使 `pip check` 能通过。
-已安装包还检查所请求 extras 的递归 metadata 依赖，不导入包运行代码。
-`install` 仅补缺失；`repair` 同时修正选中要求冲突。解析器可能替换相关依赖，
-工具不会显式卸载无关包。先以 `--only-binary=:all:` 做 wheel dry-run，确认可
-解析后才安装；没有 wheel 时失败，不自动编译来源不明的代码。
-
-CLI 先看计划，再复制当前 `plan_id` 确认执行；目标、要求、镜像或身份改变需
-重做计划：
-
-```sh
-python dependency_manager.py plan --groups cpu --python /path/to/python --proxy-mode none --json
-python dependency_manager.py repair --groups cpu --python /path/to/python --proxy-mode none --plan-id PLAN_ID --yes --events
-```
-
-`--events` 输出 JSON lines（phase/log/result）；`--json` 只输出最终 JSON。
-交互终端与高级 CLI 复用同一计划和执行函数。确认后才执行；Ctrl+C 取消会尽力终止 pip 的进程组/Windows 子进程树，
-可能已经部分安装；再次检查并确认新计划后重试。
-操作锁阻止同一目标的两个管理器同时修改；异常退出留下的 lock 不会自动删。
-
-## 镜像测速和代理
-
-内置 [PyPI](https://docs.pypi.org/api/index-api/)、
-[清华 TUNA](https://mirror.tuna.tsinghua.edu.cn/help/pypi/)、
-[USTC](https://ipv4.mirrors.ustc.edu.cn/help/pypi.html)，只接受维护方文档支持的
-HTTPS simple 地址。正常 TLS 验证，不加 trusted-host、不改全局 pip 配置。
-
-```sh
-python dependency_manager.py benchmark --mirrors pypi,tuna,ustc --proxy-mode none --json
-python dependency_manager.py plan --mirror tuna --proxy-mode http --proxy http://127.0.0.1:10808 --json
-```
-
-上例端口只是示例，工具不假定本机已开代理。`none` 直连；`env` 使用当前有效
-HTTP CONNECT 环境代理；`http` 仅本次显式 HTTP CONNECT 代理。HTTPS-proxy TLS-in-TLS / SOCKS 不支持，会明确报错；
-不会因为安装了项目 socksio 就假装标准库工具能使用它。代理统一用于测速、
-官方运行时下载和 pip；不会改系统代理/网络设置。
-
-高级 CLI 不接收 argv 里的认证信息；
-可在当前进程环境设置 `COAT_DEPENDENCY_PROXY` 后用 `--proxy-mode http`。
-日志/计划移除 URL userinfo、query 和常见 token，子进程代理放环境变量而非
-命令行；不默认持久保存凭据，凭据不进仓库。其他同用户进程仍可能读取
-进程环境，敏感代理账号应采用最小权限。
-
-测速先有界获取 simple/pip 页面，再读取固定 `pip-25.2-py3-none-any.whl`
-样本最多 256 KiB；报告实际来源、字节数、完整索引请求延迟和含连接开销的
-吞吐。每镜像有总时限，取消/超时有明确返回。结果只是网络估计，特别是
-镜像跳到 PyPI CDN 时不能称为镜像自身下载速度；推荐只有用户接受才改选源。
-
-## 没有项目 Python：受管理运行时
-
-两条路线：选择已有正常 CPython 3.10–3.13（须有 venv/ensurepip），或获取
-固定官方 Windows CPython 3.13.16。下载地址、SHA-256、架构和许可固化在
-`runtime_manifest.json`，来自 [Python.org 3.13.16 发布页](https://www.python.org/downloads/release/python-31316/)，
-不会联网自动改 manifest 或降级。Windows x64/x86/ARM64 各有独立 SHA；
-ARM64 installer 的官方状态为 Experimental，并不保证项目依赖都有 wheel。
-
-```sh
-python dependency_manager.py runtime-plan --proxy-mode none --json
-python dependency_manager.py runtime-install --proxy-mode none --plan-id PLAN_ID --yes --events
-```
-
-确认中披露官方来源、hash、所选安装根目录内的运行时目录和 [CPython 许可](https://docs.python.org/3.13/license.html)。
-校验完成前不执行下载文件。正常完整 installer 带 pip/venv，参数按
-[官方 Windows 文档](https://docs.python.org/3.13/using/windows.html#installing-without-ui)：
-非系统级安装，禁止 PATH、launcher、默认关联、快捷方式；官方安装器仍可能在所选目录外产生维护缓存及每用户注册/卸载记录。检测到同一 minor CPython 已注册时阻断，避免 installer 维护已有
-环境；请选择现有解释器。系统 UCRT 前提未验证时阻断，不请求管理员提权；VC DLL 由官方安装器随 Python 安装到其自身目录。
-启动脚本部署的完整解释器用于创建 `.venv`；官方 embedded 包缺 pip、不用于普通
-pip 管理。Linux/macOS 初版无官方等价可解包 CPython 引导，明确提示选择已有
-解释器；不私自换其他来源。
-
-项目实测环境为 Python 3.12。3.13 是新受管理候选，wheel dry-run/最终版本
-检查不能替代数值/GUI 实机验收。DirectML 仅按现有项目的 Windows
-Python3.10–3.12 profile提供：选择3.13受管理运行时时，在下载前就阻断；可选
-已有兼容解释器，不自动降级。CUDA12只开放Windows/Linux x86-64 CuPy profile，
-硬件/驱动仍手工验证；ROCm/XPU/任意vendor构建初版manual-only。
-
-## 依赖配置与验收
-
-### 运行与开发依赖
-
-CLI `--profile runtime`（默认）和交互安装使用同一清单：完整
-`desktop`为requirements.txt的15项直接运行依赖，不包含pytest、Ruff、mypy
-或打包工具。`--profile development`在已选择的运行feature基础上仅增加
-pytest/mpmath和requirements-analysis.txt中Ruff/mypy的直接固定项，合计19项。
-profile 本身不会递归安装 analysis-lock 或自动选择 GPU。交互安装另行自动选择 desktop + appearance，因此包含 Mitsuba/Dr.Jit；高级 CLI 的组与后端仍可显式选择，sandbox 不默认加入。
-
-### 历史封装实验（已停止）
-
-2026-10-14 曾验证 cx_Freeze/PyInstaller 候选方案，随后取消 EXE
-封装。两个构建入口现均拒绝执行，即使带 `--test-build` 也不会创建二进制。
-CI 仅运行源码检查。保留的 `build_catalog` 和构建依赖清单只供历史实验追溯，
-不是运行或开发配置，不会被正常部署安装。
-
-此前 PyInstaller Linux 候选包的 CLI 隔离 smoke 已通过，但没有完成 Windows
-二进制和真实 GUI 验收；不得将它作为正式发布包。旧原生依赖、许可清单见
-[历史分发记录](dependency-manager-distribution.md)，后续来源变更不能沿用此结论。
-
-源码离线测试覆盖计划、确认、配置隔离、取消、哈希/架构/路径冲突、网络失败、
-镜像来源与打包门禁。既有在线安装与旧 GUI 的历史验收不等于新交互流程验收；新入口的真实下载、运行时安装、目标依赖安装、原生启动及进程取消仍需端到端验证。
-
-## 获取本项目源码
-
-交互安装默认选择 CNB，也可选择公开 GitHub；新安装源码放到安装根目录的 `app/`。高级 CLI 使用 `project-plan` / `project-deploy`，CNB 需指定 `--source cnb --repository-url https://cnb.cool/nonereason/coating-sim`，GitHub 使用 `--source github`。
-
-新部署只接受新目录。分支/标签解析后记录完整提交 SHA；先准备源码，再展示完整依赖计划，经确认后仅在该 checkout 的 `.venv` 安装依赖。执行使用已确认计划，不再次拉取代码。已有合法工程在交互模式只安装依赖，不自动更新源码；工具不接收或保存 Git 凭据。CNB 匿名读取及管理器计划已验证，不代表完整部署或所有平台验收。详见[部署约定](dependency-manager-deployment.md)。
-
-## 已有 Python 自动识别与 DirectML 阻止提示
-
-新建目标环境且未显式指定创建用 CPython 时，管理器会从已知位置有限探测已有
-Python，并选择首个与后端兼容的正常解释器。显式填写的路径不会被自动替换。
-现有目标 venv 的解释器始终优先；选择另一个创建 Python 不会改变已有 venv。
-自动识别只读，不会下载或安装 Python，也不会更改 PATH。
-
-DirectML 的 Windows / Python 3.10–3.12 检查发生在 pip 下载之前，因此此类
-阻止不能靠切换清华等镜像解决。提示会列出实际探测的平台、版本；探测失败时
-显示 unknown 和失败原因，不把管理器自身的 Python 当作目标版本。
-
-若现有环境使用不兼容版本，请保留该环境。依赖管理可显式选择兼容 Python，
-并将新目标设为未使用的 `.venv-directml`；项目部署固定使用 checkout/.venv，
-因此应选择新的部署目录并选择兼容 Python，而不是修改已有环境。
-现有受管理下载清单仅提供 Python 3.13，不能用于当前 DirectML 配置。
+Manual inspect/repair interfaces remain available for explicitly selected environments. They do not trigger external Python discovery in the installation flow. CLI plans require the reviewed plan ID, and package-index changes require a fresh plan.

@@ -51,6 +51,32 @@ _PROXY_KEYS = (
     "all_proxy",
 )
 _NO_PROXY_KEYS = ("NO_PROXY", "no_proxy")
+DEFAULT_MIRROR = "tuna"
+
+
+def resolve_mirror(project, explicit=None):
+    """Project-local reviewed choices precede the first-install TUNA default."""
+    if explicit is not None:
+        if explicit not in MIRRORS:
+            raise ValueError("Unknown registry mirror")
+        return explicit
+    from pathlib import Path
+
+    from .project_deploy import read_project_deployment_plan
+
+    root = Path(project).absolute()
+    candidates = (root, root / "app")
+    for candidate in candidates:
+        path = candidate / ".git" / "dependency-manager-deploy" / "plan.json"
+        if path.is_file():
+            plan = read_project_deployment_plan(candidate)
+            saved = plan.get("dependency_plan", {}).get("mirror")
+            if saved not in MIRRORS:
+                raise ValueError("Stored project mirror is invalid; select a source explicitly")
+            return saved
+    return DEFAULT_MIRROR
+
+
 _MAX_MIRRORS = 4
 _MAX_INDEX_BYTES = 1024 * 1024
 _MAX_SAMPLE_BYTES = 1024 * 1024

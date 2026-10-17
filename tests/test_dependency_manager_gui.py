@@ -33,13 +33,13 @@ def test_update_action_is_read_only_and_page_requires_click(window, monkeypatch,
 
 
 def test_python_reuse_is_shown_as_success_in_gui(window, monkeypatch, tmp_path):
-    monkeypatch.setattr(python_setup, "discover_python", lambda *a, **k: {"status": "ready", "selected_python": "normal/python.exe"})
-    monkeypatch.setattr(python_setup, "execute_runtime", lambda *a: pytest.fail("reuse must never install"))
+    monkeypatch.setattr(python_setup, "plan_runtime", lambda **k: {"status": "ready", "action": "reuse"})
+    monkeypatch.setattr(python_setup, "execute_runtime", lambda *a: {"status": "success", "reused": True, "installer_executed": False})
     app = gui.DependencyManagerWindow(window, tmp_path / "selected")
     app.start("python")
     pump(window, lambda: not app.busy)
     assert app.last_code == 0
-    assert "无需重装" in app.status.get()
+    assert "私有 Python" in app.status.get()
     assert "reused" in app.log.get("1.0", "end")
 
 
@@ -118,7 +118,6 @@ def test_cancel_keeps_available_cleanup_diagnostics():
 
 @pytest.fixture
 def window(monkeypatch):
-    monkeypatch.setattr(python_setup, 'discover_python', lambda *a, **k: {'status': 'missing', 'selected_python': None})
     if tk is None:
         pytest.skip("Tcl/Tk not installed")
     # Repeated test roots leave Python/Tcl cycles. Reclaim them on the Tk thread,
@@ -386,7 +385,7 @@ def test_managed_runtime_patch_status_is_visible_before_install(window, tmp_path
     assert label.winfo_rooty() + label.winfo_height() <= window.winfo_rooty() + window.winfo_height()
     notice = label.cget("text")
     assert runtime_manifest()["version"] in notice
-    assert "最后传统官方完整安装包" in notice
+    assert "官方 NuGet" in notice
     assert "非最新安全补丁" in notice
-    assert "优先复用" in notice
+    assert "不扫描或复用系统 Python" in notice
     assert not app.busy and not (tmp_path / "uncreated").exists()

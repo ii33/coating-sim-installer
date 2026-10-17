@@ -14,7 +14,7 @@ from typing import Any
 
 from .app_info import VERSION, icon_path
 from .interactive import project_directory, run_interactive
-from .mirrors import ProxyConfig, redact
+from .mirrors import ProxyConfig, redact, resolve_mirror
 from .python_setup import prepare_python
 from .runtime import managed_runtime_notice
 from .runtime_paths import unlinked_local_path
@@ -41,7 +41,7 @@ PHASES = {
     "launch": "创建启动脚本：短事务正在完成，取消将等待安全收尾",
 }
 QUESTIONS = {
-    "python": "安装独立 Python？请核对下方官方来源、SHA256、许可和目标目录。已有兼容 Python 可以跳过。",
+    "python": "确认项目私有 Python：官方 NuGet/镜像、固定 SHA256、许可和目录；不扫描系统 Python，不运行 EXE/MSI。",
     "git": "安装目录内缺少可用 Git。是否按下方官方来源、校验值和目录安装独立 Git？",
     "install": "源码已准备。是否按下方源码版本、目录、完整依赖和启动脚本计划开始安装？",
 }
@@ -121,7 +121,7 @@ class InstallerSession:
 
 
 class DependencyManagerWindow:
-    def __init__(self, window, project):
+    def __init__(self, window, project, *, mirror=None):
         self.window = window
         window.title("Coating Sim · 在线安装器 " + VERSION)
         try:
@@ -133,7 +133,11 @@ class DependencyManagerWindow:
         window.protocol("WM_DELETE_WINDOW", self.close)
         self.directory = tk.StringVar(value=str(Path(project).absolute()))
         self.source = tk.StringVar(value="cnb")
-        self.mirror = tk.BooleanVar(value=False)
+        self.explicit_mirror = mirror
+        initial_mirror = resolve_mirror(project, mirror)
+        self.mirror = tk.BooleanVar(value=initial_mirror != "pypi")
+        self.mirror_changed = False
+        self.mirror.trace_add("write", lambda *unused: setattr(self, "mirror_changed", True))
         self.development = tk.BooleanVar(value=False)
         self.update_channel = tk.StringVar(value="preview")
         self.update_page = None
@@ -186,7 +190,7 @@ class DependencyManagerWindow:
             button.grid(row=0, column=column, sticky="w", padx=(0, 16))
             self.controls.append(button)
         for row, label, variable in (
-            (4, "镜像加速（清华 PyPI）", self.mirror),
+            (4, "镜像加速（包索引默认清华 TUNA + Python 华为云；取消用官方源）", self.mirror),
             (5, "开发环境（含测试与检查工具）", self.development),
         ):
             control = ttk.Checkbutton(body, text=label, variable=variable)
@@ -273,6 +277,8 @@ class DependencyManagerWindow:
         try:
             root = Path(self.directory.get()).expanduser().absolute()
             project_directory(root)
+            chosen_mirror = resolve_mirror(
+                root, ("tuna" if self.mirror.get() else "pypi") if self.mirror_changed else self.explicit_mirror)
             logs = root / ".dependency-manager" / "logs"
             if not unlinked_local_path(logs):
                 raise ValueError("日志目录不能使用链接或重解析点")
@@ -287,7 +293,7 @@ class DependencyManagerWindow:
             return
         self.session = InstallerSession({
             "directory": str(root), "source": "1" if self.source.get() == "cnb" else "2",
-            "mirror": "y" if self.mirror.get() else "n",
+            "mirror": "y" if chosen_mirror != "pypi" else "n",
             "development": "y" if self.development.get() else "n",
         })
         session = self.session
@@ -315,11 +321,11 @@ class DependencyManagerWindow:
             try:
                 if operation == "python":
                     proxy = ProxyConfig("env")
-                    code, completion_details, summary = prepare_python(root, proxy, session.cancel_event, review, output, session.prompt)
+                    code, completion_details, summary = prepare_python(root, proxy, session.cancel_event, review, output, session.prompt, mirror=chosen_mirror)
                 else:
                     code = run_interactive(root, output=output, prompt_fn=session.prompt,
                                            phase_fn=lambda value: session.send("phase", value),
-                                           plan_fn=review, cancel_event=session.cancel_event)
+                                           plan_fn=review, cancel_event=session.cancel_event, mirror=chosen_mirror)
             except (KeyboardInterrupt, EOFError):
                 code = 130
             except Exception as exc:
@@ -504,7 +510,7 @@ class DependencyManagerWindow:
                 self.status.set("无法打开日志：" + redact(str(exc)))
 
 
-def run_gui(project):
+def run_gui(project, *, mirror=None):
     if tk is None:
         print("GUI unavailable: install a full Python with Tcl/Tk, or use install.bat / install.sh for the terminal installer.", file=sys.stderr)
         return 2
@@ -513,6 +519,6 @@ def run_gui(project):
     except tk.TclError as exc:
         print("GUI unavailable: " + redact(str(exc)) + "; use install.bat / install.sh for the terminal installer.", file=sys.stderr)
         return 2
-    DependencyManagerWindow(window, project)
+    DependencyManagerWindow(window, project, mirror=mirror)
     window.mainloop()
     return 0

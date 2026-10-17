@@ -155,14 +155,14 @@ function Read-CoatManifest([string]$Path) {
         $manifest.version -notmatch '^3\.1[0-3]\.\d+$') {
         Stop-CoatBootstrap "Unsupported runtime manifest schema/platform/version."
     }
-    [void](Assert-CoatOfficialUri $manifest.source)
+    [void](Assert-CoatOfficialUri $manifest.source "www.nuget.org")
     [void](Assert-CoatOfficialUri $manifest.license "docs.python.org")
     [void](Assert-CoatOfficialUri $manifest.documentation "docs.python.org" -AllowFragment)
     foreach ($property in $manifest.artifacts.PSObject.Properties) {
         if ($property.Name -notin @("x86_64", "x86", "arm64")) {
             Stop-CoatBootstrap "Unsupported runtime manifest architecture."
         }
-        [void](Assert-CoatOfficialUri $property.Value.url)
+        [void](Assert-CoatOfficialUri $property.Value.url "api.nuget.org")
         if ($property.Value.sha256 -cnotmatch '^[0-9a-f]{64}$') {
             Stop-CoatBootstrap "Invalid pinned runtime SHA-256."
         }
@@ -599,7 +599,15 @@ function Invoke-CoatBootstrap {
         $script:BootstrapPhase = "python_probe"
         $explicit = if ($BootstrapPython) { $BootstrapPython } else { $env:COAT_DEPENDENCY_PYTHON }
         $requireGui = [bool]$Gui
-        $identity = Find-CoatPython $explicit $directory $architecture $requireGui
+        . (Join-Path $PSScriptRoot "bootstrap_private.ps1")
+        $identity = $null
+        # An explicit interpreter is only the source front-end host; application
+        # preparation still always uses the project-owned NuGet runtime.
+        if ($explicit) { $identity = Test-CoatPython $explicit $architecture $requireGui }
+        elseif (Test-Path -LiteralPath $directory) {
+            Test-CoatPrivateRuntime $directory $manifest
+            $identity = Test-CoatPython (Join-Path $directory "python.exe") $architecture $requireGui
+        }
         if ($CheckOnly) {
             $status = if ($identity) { "ready" } else { "missing" }
             [Console]::WriteLine((@{ schema_version = 1; operation = "bootstrap_check"; status = $status;
@@ -609,7 +617,14 @@ function Invoke-CoatBootstrap {
         }
         if (-not $identity) {
             $proxy = Get-CoatDownloadProxy $BootstrapProxyMode $BootstrapProxy
-            $identity = Install-CoatRuntime $manifest $architecture $directory $homeDirectory $proxy $requireGui
+            if ($Gui) { Stop-CoatBootstrap "The official private NuGet runtime has no Tcl/Tk. Use the packaged GUI EXE, or supply an explicit full Tcl/Tk interpreter only to host the source front end. The application still gets private Python." }
+            if ($architecture -ne "x86_64") { Stop-CoatBootstrap "Private Python currently supports Windows x64 only." }
+            $mirror = $true
+            for ($index = 0; $index -lt $ManagerArguments.Count; $index++) {
+                if ($ManagerArguments[$index] -eq "--mirror=pypi" -or
+                    ($ManagerArguments[$index] -eq "--mirror" -and $index + 1 -lt $ManagerArguments.Count -and $ManagerArguments[$index + 1] -eq "pypi")) { $mirror = $false }
+            }
+            $identity = Install-CoatPrivateRuntime $manifest $directory $homeDirectory $proxy $mirror
         }
         Write-CoatBootstrap ("Manager Python: " + $identity.executable + " (" + $identity.version + ")")
         $script:BootstrapPhase = "manager_launch"

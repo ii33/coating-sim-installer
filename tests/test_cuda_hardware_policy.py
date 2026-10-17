@@ -233,11 +233,11 @@ def test_conflicting_cupy_distribution_is_preserved(monkeypatch, tmp_path):
     assert plan["status"] == "blocked" and any("Conflicting CuPy" in e for e in plan["errors"])
 
 
-def test_runtime_defaults_to_compatible_312_and_registration_guard_remains(monkeypatch, tmp_path):
-    assert runtime.runtime_manifest()["version"] == "3.12.10"
-    monkeypatch.setattr(runtime, "_registered_python_paths", lambda *a: ["existing-python"])
-    plan = runtime.plan_runtime(project=tmp_path, platform_name="win32", machine="AMD64")
-    assert plan["status"] == "blocked" and any("already registered" in e for e in plan["errors"])
+def test_runtime_defaults_to_compatible_312_and_registration_guard_remains(monkeypatch,tmp_path):
+    assert runtime.runtime_manifest()["version"]=="3.12.10"
+    monkeypatch.setattr(runtime,"_registered_python_paths",lambda *a:pytest.fail("no registry scan"))
+    plan=runtime.plan_runtime(project=tmp_path,platform_name="win32",machine="AMD64")
+    assert plan["status"]=="ready" and plan["distribution"]=="official-nuget"
 
 
 def test_discovery_prefers_312_and_rejects_313_for_default_directml(monkeypatch, tmp_path):

@@ -587,14 +587,13 @@ class RuntimeTests(unittest.TestCase):
         )
 
     def test_fixed_manifest_official_hashes_and_architecture(self):
-        manifest = runtime.runtime_manifest()
-        self.assertEqual(manifest["version"], "3.12.10")
-        for arch in ("AMD64", "x86", "ARM64"):
-            plan = runtime.plan_runtime(
-                self.directory, proxy=self.proxy, platform_name="win32", machine=arch
-            )
-            self.assertEqual(plan["status"], "ready", plan["errors"])
-            self.assertEqual(len(plan["artifact"]["sha256"]), 64)
+        manifest=runtime.runtime_manifest()
+        self.assertEqual(manifest["version"],"3.12.10")
+        self.assertEqual(manifest["distribution"],"official-nuget")
+        for arch in ("AMD64","x86","ARM64"):
+            plan=runtime.plan_runtime(self.directory,proxy=self.proxy,platform_name="win32",machine=arch)
+            self.assertEqual(plan["status"],"ready" if arch=="AMD64" else "blocked")
+            self.assertEqual(len(plan["artifact"]["sha256"]),64)
 
     def test_linux_unknown_arch_and_directml_are_blocked_before_download(self):
         for kwargs in (
@@ -718,62 +717,28 @@ class RuntimeTests(unittest.TestCase):
                 self.assertFalse(destination.exists())
 
     def test_existing_registered_python_prevents_maintenance_of_other_environment(self):
-        with patch.object(
-            runtime,
-            "_registered_python_paths",
-            return_value=[str(self.home / "other-python")],
-        ):
-            self.assertEqual(self.plan()["status"], "blocked")
+        with patch.object(runtime,"_registered_python_paths",side_effect=AssertionError("no registry scan")):
+            self.assertEqual(self.plan()["status"],"ready")
 
     def test_runtime_download_does_not_require_global_vc_dll(self):
-        import ctypes
-
-        plan = self.plan()
-        with (
-            patch.object(runtime, "plan_runtime", return_value=plan),
-            patch.dict(os.environ, {"SystemRoot": str(self.home)}),
-            patch.object(ctypes, "WinDLL", create=True) as loader,
-            patch.object(runtime, "_windows_file_version", return_value=(10, 0, 10240, 0)),
-            patch.object(runtime, "download_runtime") as download,
-            patch.object(runtime, "run_command", return_value=1603) as install,
-        ):
-            result = runtime.execute_runtime(plan, True, proxy=self.proxy)
-            self.assertEqual(result["status"], "failed")  # Synthetic installer exit, no real execution.
-            self.assertIn("1603", result["errors"][0])
+        with patch.object(runtime,"_verify_system_ucrt",side_effect=AssertionError("no prerequisite scan")), \
+             patch.object(runtime,"download_runtime",side_effect=OSError("offline")) as download, \
+             patch.object(runtime,"run_command") as installer:
+            result=runtime.execute_runtime(self.plan(),True,proxy=self.proxy)
+            self.assertEqual(result["status"],"failed")
+            self.assertIn("offline",result["errors"][0])
             download.assert_called_once()
-            install.assert_called_once()
-            loader.assert_called_once_with(str(self.home / "System32/ucrtbase.dll"))
-        self.assertFalse((self.home / "System32/vcruntime140.dll").exists())
+            installer.assert_not_called()
 
     def test_missing_or_old_ucrt_blocks_before_download_or_install(self):
-        import ctypes
-
-        plan = self.plan()
-        for version in ((9, 0, 20000, 0), (10, 0, 10136, 99)):
-            with (
-                self.subTest(version=version),
-                patch.object(runtime, "plan_runtime", return_value=plan),
-                patch.dict(os.environ, {"SystemRoot": str(self.home)}),
-                patch.object(ctypes, "WinDLL", create=True),
-                patch.object(runtime, "_windows_file_version", return_value=version),
-                patch.object(runtime, "download_runtime") as download,
-                patch.object(runtime, "run_command") as install,
-            ):
-                result = runtime.execute_runtime(plan, True, proxy=self.proxy)
-                self.assertEqual(result["status"], "blocked")
-                self.assertIn("UCRT", result["errors"][0])
-                download.assert_not_called()
-                install.assert_not_called()
-        with (
-            patch.object(runtime, "plan_runtime", return_value=plan),
-            patch.dict(os.environ, {"SystemRoot": str(self.home)}),
-            patch.object(ctypes, "WinDLL", create=True, side_effect=OSError("missing UCRT")),
-            patch.object(runtime, "download_runtime") as download,
-            patch.object(runtime, "run_command") as install,
-        ):
-            self.assertEqual(runtime.execute_runtime(plan, True, proxy=self.proxy)["status"], "blocked")
-            download.assert_not_called()
-            install.assert_not_called()
+        with patch.object(runtime,"_verify_system_ucrt",side_effect=AssertionError("no prerequisite scan")), \
+             patch.object(runtime,"download_runtime",side_effect=OSError("offline")) as download, \
+             patch.object(runtime,"run_command") as installer:
+            result=runtime.execute_runtime(self.plan(),True,proxy=self.proxy)
+            self.assertEqual(result["status"],"failed")
+            self.assertIn("offline",result["errors"][0])
+            download.assert_called_once()
+            installer.assert_not_called()
 
     @unittest.skipUnless(sys.platform == "win32", "Real UCRT version API requires Windows")
     def test_native_windows_system_ucrt_readiness_is_verified(self):

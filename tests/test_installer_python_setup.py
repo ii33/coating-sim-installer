@@ -8,24 +8,20 @@ from tools.dependency_manager import python_discovery, python_setup
 from tools.dependency_manager.mirrors import ProxyConfig
 
 
-def test_registered_compatible_python_is_reused_without_install_plan(monkeypatch, tmp_path):
-    monkeypatch.setattr(python_setup, "discover_python", lambda *a, **k: {"status": "ready", "selected_python": "normal/python.exe"})
-    monkeypatch.setattr(python_setup, "plan_runtime", lambda **k: (_ for _ in ()).throw(AssertionError("must not plan a duplicate installer")))
-    monkeypatch.setattr(python_setup, "execute_runtime", lambda *a: (_ for _ in ()).throw(AssertionError("must not install")))
-    code, detail, summary = python_setup.prepare_python(tmp_path, ProxyConfig("none"), threading.Event(), lambda p: None, lambda m: None, lambda k: "y")
-    assert code == 0 and json.loads(detail)["status"] == "reused"
-    assert json.loads(detail)["installer_executed"] is False
-    assert "无需重装" in summary and not list(tmp_path.iterdir())
+def test_registered_compatible_python_is_reused_without_install_plan(monkeypatch,tmp_path):
+    monkeypatch.setattr(python_setup,"plan_runtime",lambda **k:{"status":"ready","action":"reuse"})
+    monkeypatch.setattr(python_setup,"execute_runtime",lambda *a:{"status":"success","reused":True,"installer_executed":False})
+    code,detail,summary=python_setup.prepare_python(tmp_path,ProxyConfig("none"),threading.Event(),lambda p:None,lambda m:None,lambda k: (_ for _ in ()).throw(AssertionError("no confirmation needed for read-only owned reuse")))
+    assert code==0 and json.loads(detail)["reused"] is True
+    assert not list(tmp_path.iterdir())
 
 
-def test_unusable_registration_remains_blocked_with_actionable_reason(monkeypatch, tmp_path):
-    monkeypatch.setattr(python_setup, "discover_python", lambda *a, **k: {"status": "missing", "selected_python": None})
-    monkeypatch.setattr(python_setup, "plan_runtime", lambda **k: {"status": "blocked", "errors": ["same minor is already registered"]})
-    called = []
-    monkeypatch.setattr(python_setup, "execute_runtime", lambda *a: called.append(a))
-    code, detail, summary = python_setup.prepare_python(tmp_path, ProxyConfig("none"), threading.Event(), lambda p: None, lambda m: None, lambda k: "y")
-    assert code == 2 and "already registered" in detail and "未执行安装" in summary
-    assert not called
+def test_unusable_registration_remains_blocked_with_actionable_reason(monkeypatch,tmp_path):
+    monkeypatch.setattr(python_setup,"plan_runtime",lambda **k:{"status":"blocked","errors":["unknown project runtime; preserved"]})
+    calls=[]
+    monkeypatch.setattr(python_setup,"execute_runtime",lambda *a:calls.append(a))
+    code,detail,summary=python_setup.prepare_python(tmp_path,ProxyConfig("none"),threading.Event(),lambda p:None,lambda m:None,lambda k:"y")
+    assert code==2 and "preserved" in detail and not calls
 
 
 def test_frozen_runtime_never_becomes_discovery_candidate(monkeypatch, tmp_path):

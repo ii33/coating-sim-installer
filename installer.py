@@ -22,7 +22,7 @@ def self_check():
               "frozen": bool(getattr(sys, "frozen", False)), "status": "failed",
               "python": platform.python_version(), "architecture_bits": struct.calcsize("P") * 8,
               "default_project": str(default_installation_directory()), "tls": ssl.OPENSSL_VERSION,
-              "installer_executed": False, "network_used": False, "project_python": "external full CPython; never this frozen EXE"}
+              "installer_executed": False, "network_used": False, "project_python": "project-private CPython 3.12.10 from official NuGet; never this frozen EXE"}
     root = None
     try:
         import tkinter as tk
@@ -67,10 +67,22 @@ def main(argv=None):
     parser.add_argument("--self-check", action="store_true", help="Offline Tk/resource self-check; never install")
     parser.add_argument("--self-check-output", type=Path)
     parser.add_argument("--smoke-gui", action="store_true", help="Open GUI briefly without invoking installation")
+    parser.add_argument("--verify-private-runtime", action="store_true", help="Explicit diagnostic: deploy/reuse private Python at the explicitly selected project")
     parser.add_argument("--verify-venv", type=Path, help="Explicit diagnostic: create a new no-pip venv at this selected path")
     parser.add_argument("--python", type=Path, help="Normal external CPython for --verify-venv")
     parser.add_argument("--version", action="version", version=VERSION)
     args = parser.parse_args(argv)
+    if args.verify_private_runtime:
+        from tools.dependency_manager.mirrors import ProxyConfig
+        from tools.dependency_manager.runtime import execute_runtime, plan_runtime
+        if args.project is None:
+            raise ValueError("--verify-private-runtime requires an explicit --project")
+        proxy = ProxyConfig("env")
+        plan = plan_runtime(project=args.project, proxy=proxy, runtime_mirror=True)
+        result = execute_runtime(plan, True, cancel_event=threading.Event(), proxy=proxy)
+        result["frozen"] = bool(getattr(sys, "frozen", False))
+        write_report(args.self_check_output, result)
+        return 0 if result["status"] == "success" else 2
     if args.verify_venv:
         from tools.dependency_manager.external_program import run
         from tools.dependency_manager.manager import clean_environment

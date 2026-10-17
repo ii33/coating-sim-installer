@@ -7,14 +7,11 @@ import json
 import os
 import platform
 import re
-import shutil
+import subprocess
 import sys
-import tempfile
 import threading
-import time
-import uuid
+import zipfile
 from pathlib import Path
-from typing import Any
 from urllib.parse import urlsplit
 from urllib.request import (
     HTTPRedirectHandler,
@@ -23,7 +20,8 @@ from urllib.request import (
     build_opener,
 )
 
-from .manager import probe_python, run_command
+from .manager import probe_python
+from .manager import run_command as run_command
 from .mirrors import ProxyConfig, _effective_proxy_map, _UniformProxyHandler, redact
 from .runtime_paths import contained_runtime_path, project_root
 
@@ -32,31 +30,34 @@ MANIFEST_PATH = Path(__file__).with_name("runtime_manifest.json")
 
 def runtime_manifest():
     data = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    if data["schema_version"] != 1:
-        raise ValueError("Unknown runtime manifest schema")
-    for artifact in data["artifacts"].values():
-        parsed = urlsplit(artifact["url"])
-        if (
-            parsed.scheme != "https"
-            or parsed.hostname != "www.python.org"
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.port not in (None, 443)
-            or parsed.query
-            or parsed.fragment
-        ):
-            raise ValueError("Runtime must come from the fixed official HTTPS source")
-        if not re.fullmatch(r"[0-9a-f]{64}", artifact["sha256"]):
+    if data["schema_version"] != 1 or data.get("distribution") != "official-nuget":
+        raise ValueError("Unknown private runtime manifest schema")
+    if set(data["artifacts"]) != {"x86_64"}:
+        raise ValueError("Private runtime requires the reviewed Windows x64 package")
+    artifact = data["artifacts"]["x86_64"]
+    expected = f"https://api.nuget.org/v3-flatcontainer/python/{data['version']}/python.{data['version']}.nupkg"
+    if artifact["url"] != expected:
+        raise ValueError("Runtime must come from the pinned official NuGet HTTPS source")
+    for key in ("sha256", "inventory_sha256"):
+        if not re.fullmatch(r"[0-9a-f]{64}", artifact[key]):
             raise ValueError("Invalid pinned runtime SHA-256")
+    for mirror in artifact.get("mirrors", []):
+        if mirror != {"id": "huawei", "url": _mirror_url(expected), "verified_on": data["verified_date"]}:
+            raise ValueError("Unapproved runtime mirror")
     return data
 
 
+def _mirror_url(url):
+    if url.startswith("https://api.nuget.org/v3-flatcontainer/python/"):
+        return url.replace("https://api.nuget.org/v3-flatcontainer/",
+            "https://mirrors.huaweicloud.com/artifactory/api/nuget/v3/nuget-remote/", 1)
+    return url.replace("https://www.python.org/ftp/python/", "https://mirrors.huaweicloud.com/python/", 1)
+
+
 def managed_runtime_notice():
-    version = runtime_manifest()["version"]
-    return (
-        f"Windows 托管应用 Python {version} 是 3.12 系列最后传统官方完整安装包，非最新安全补丁。"
-        "优先复用已有较新的完整 Python 3.12；已有环境不会被替换。"
-    )
+    return ("项目私有 Python 3.12.10 x64（CPython 官方 NuGet，含 venv/pip）；不扫描或复用系统 Python，"
+            "不运行 EXE/MSI，不改注册或 PATH。3.12.10 非最新安全补丁。")
+
 
 
 def _architecture(machine):
@@ -110,8 +111,12 @@ def _registered_python_paths(version):
 
 
 def plan_runtime(
-    directory=None, backend="cpu", proxy=None, *, platform_name=None, machine=None, project=None
+    directory=None, backend="cpu", proxy=None, *, platform_name=None, machine=None, project=None,
+    runtime_mirror=False,
 ):
+    from .private_runtime import inspect_owned
+    if not isinstance(runtime_mirror, bool):
+        raise ValueError("runtime_mirror must be a boolean")
     manifest = runtime_manifest()
     platform_name = platform_name or sys.platform
     machine = _architecture(machine or platform.machine())
@@ -124,88 +129,48 @@ def plan_runtime(
     while not ancestor.exists() and ancestor != ancestor.parent:
         ancestor = ancestor.parent
     parent_stat = ancestor.stat() if ancestor.is_dir() else None
-    parent_identity = (
-        {
-            "path": str(ancestor.resolve()),
-            "device": parent_stat.st_dev,
-            "inode": parent_stat.st_ino,
-        }
-        if parent_stat
-        else None
-    )
-    errors, warnings = (
-        [],
-        [
-            "This is a separate normal CPython for creating project venvs; the bundled tool runtime is never used with -m venv",
-            "Windows full installer creates per-user maintenance/uninstall records; no PATH, launcher, associations or shortcuts",
-            managed_runtime_notice(),
-            "Application default is CPython 3.12; the installer executable runtime is independent. Existing same-minor registrations are preserved and reused, never overwritten",
-            "If prerequisites require administrator access, stop and report the prerequisite; this tool never requests elevation",
-        ],
-    )
+    parent_identity = ({"path": str(ancestor.resolve()), "device": parent_stat.st_dev, "inode": parent_stat.st_ino}
+                       if parent_stat else None)
+    errors, warnings, action = [], [managed_runtime_notice()], "extract"
+    if platform_name != "win32" or machine != "x86_64":
+        errors.append("Project-private Python currently supports Windows x64 only")
     if backend not in ("cpu", "cuda12", "cuda13", "directml", "rocm", "xpu"):
         errors.append("Unknown backend")
-    if backend in ("cuda12", "cuda13") and machine != "x86_64":
-        errors.append("Managed CUDA12 wheel profile requires x86-64")
-    registered = (
-        _registered_python_paths(manifest["version"])
-        if platform_name == "win32"
-        else []
-    )
-    if registered:
-        errors.append(
-            "A CPython of this minor version is already registered; select its interpreter to avoid installer maintenance of another environment"
-        )
-    if platform_name != "win32":
-        errors.append(
-            "Managed runtime download is Windows-only; select an existing CPython on Linux/macOS"
-        )
-    if machine not in manifest["artifacts"]:
-        errors.append("Unsupported Windows architecture")
-    if backend == "directml" and machine != "x86_64":
-        errors.append("DirectML requires an x86-64 Python wheel target")
-    if backend in ("rocm", "xpu"):
-        errors.append("This vendor backend requires a manual environment")
-    if directory.exists():
-        errors.append(
-            "Managed runtime destination already exists; select its python.exe or a new empty path; no overwrite"
-        )
     if not contained_runtime_path(directory, boundary):
-        errors.append(
-            "Managed runtime destination must be a new unlinked local path inside the selected project (or user home for an explicit legacy path)"
-        )
-    artifact = manifest["artifacts"].get(machine)
+        errors.append("Managed runtime destination must be an unlinked local path inside the selected project")
+    if directory.exists() and not errors:
+        try:
+            inspect_owned(directory, manifest)
+            action = "reuse"
+        except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile, subprocess.SubprocessError) as exc:
+            errors.append(str(exc))
+    artifact = manifest["artifacts"]["x86_64"]
     plan = {
-        "schema_version": 1,
-        "operation": "runtime_plan",
-        "status": "blocked" if errors else "ready",
-        "directory": str(directory),
-        "project": str(selected_project) if selected_project is not None else None,
-        "parent_identity": parent_identity,
-        "platform": platform_name,
-        "architecture": machine,
-        "version": manifest["version"],
-        "artifact": artifact,
-        "source": manifest["source"],
-        "license": manifest["license"],
-        "proxy": proxy.public(),
-        "backend": backend,
-        "requires_confirmation": True,
-        "warnings": warnings,
-        "errors": errors,
+        "schema_version": 1, "operation": "runtime_plan", "status": "blocked" if errors else "ready",
+        "action": action, "directory": str(directory), "project": str(selected_project) if selected_project else None,
+        "parent_identity": parent_identity, "platform": platform_name, "architecture": machine,
+        "version": manifest["version"], "distribution": manifest["distribution"],
+        "artifact": {k: v for k, v in artifact.items() if runtime_mirror or k != "mirrors"},
+        "runtime_mirror": runtime_mirror,
+        "download_policy": {"connect_seconds": 10, "idle_read_seconds": 15, "attempts_per_source": 2,
+                            "max_bytes": 128 * 1024 * 1024, "total_duration_limit": None},
+        "source": manifest["source"], "license": manifest["license"], "proxy": proxy.public(),
+        "backend": backend, "requires_confirmation": action != "reuse", "warnings": warnings, "errors": errors,
     }
-    plan["plan_id"] = hashlib.sha256(
-        json.dumps(plan, sort_keys=True).encode()
-    ).hexdigest()
+    plan["plan_id"] = hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
     return plan
 
 
 class _OfficialRedirect(HTTPRedirectHandler):
+    def __init__(self, mirror_urls=()):
+        super().__init__()
+        self.mirror_urls = frozenset(mirror_urls)
+
     def redirect_request(self, request, fp, code, msg, headers, newurl):
         parsed = urlsplit(newurl)
         if (
             parsed.scheme != "https"
-            or parsed.hostname != "www.python.org"
+            or (parsed.hostname not in ("www.python.org", "api.nuget.org") and newurl not in self.mirror_urls)
             or parsed.username is not None
             or parsed.password is not None
             or parsed.port not in (None, 443)
@@ -217,62 +182,37 @@ class _OfficialRedirect(HTTPRedirectHandler):
 
 
 def download_runtime(
-    artifact,
-    destination,
-    proxy,
-    cancel_event,
-    emit,
-    *,
-    timeout=10,
-    max_bytes=128 * 1024 * 1024,
+    artifact, destination, proxy, cancel_event, emit, *,
+    timeout=10, idle_timeout=15, max_bytes=128 * 1024 * 1024,
 ):
-    """Bounded binary download with mandatory hash verification before execution."""
+    """Approved mirrors first when requested; all bytes use the official hash."""
+    from .runtime_download import download
+
+    parsed = urlsplit(artifact["url"])
+    if (parsed.scheme != "https" or parsed.hostname not in ("www.python.org", "api.nuget.org")
+            or parsed.username is not None or parsed.password is not None
+            or parsed.port not in (None, 443) or parsed.query or parsed.fragment):
+        raise ValueError("Runtime must come from the fixed official HTTPS source")
+    if not re.fullmatch(r"[0-9a-f]{64}", artifact["sha256"]):
+        raise ValueError("Invalid pinned runtime SHA-256")
+    sources = []
+    approved = _mirror_url(artifact["url"])
+    for mirror in artifact.get("mirrors", []):
+        if mirror.get("id") != "huawei" or mirror.get("url") != approved or not approved.startswith("https://mirrors.huaweicloud.com/"):
+            raise ValueError("Unapproved Python runtime mirror")
+        if not sources:
+            sources.append({"id": "huawei", "url": approved})
+    sources.append({"id": "official", "url": artifact["url"]})
     proxies = _effective_proxy_map(proxy)
-    opener = build_opener(
-        _UniformProxyHandler(proxies), HTTPSHandler(), _OfficialRedirect()
-    )
-    digest = hashlib.sha256()
-    total = 0
-    start = time.monotonic()
-    try:
-        with (
-            opener.open(
-                Request(
-                    artifact["url"],
-                    headers={"User-Agent": "DepositionDependencyManager/1"},
-                ),
-                timeout=timeout,
-            ) as response,
-            open(destination, "xb") as output,
-        ):
-            while True:
-                if cancel_event.is_set():
-                    raise InterruptedError("Runtime download cancelled")
-                if time.monotonic() - start > 180:
-                    raise TimeoutError("Runtime download exceeded the 180-second bound")
-                chunk = getattr(response, "read1", response.read)(64 * 1024)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > max_bytes:
-                    raise ValueError("Runtime download exceeds size bound")
-                digest.update(chunk)
-                output.write(chunk)
-                emit(
-                    {
-                        "event": "progress",
-                        "phase": "runtime_download",
-                        "download_bytes": total,
-                    }
-                )
-        if digest.hexdigest() != artifact["sha256"]:
-            raise ValueError(
-                "Runtime SHA-256 mismatch; the downloaded file will not be executed"
-            )
-        return total
-    except Exception:
-        Path(destination).unlink(missing_ok=True)
-        raise
+
+    def opener_factory(url):
+        mirror_urls = (approved,) if url == approved else ()
+        opener = build_opener(
+            _UniformProxyHandler(proxies), HTTPSHandler(), _OfficialRedirect(mirror_urls))
+        return opener, Request(url, headers={"User-Agent": "CoatingSimInstaller/1"})
+
+    return download(artifact, destination, sources, opener_factory, cancel_event, emit, proxy,
+                    connect_timeout=timeout, idle_timeout=idle_timeout, max_bytes=max_bytes)
 
 
 def installer_arguments(installer, directory, log_path=None):
@@ -304,7 +244,7 @@ def _verify_runtime_destination(plan):
     directory = Path(plan["directory"])
     if (
         not contained_runtime_path(directory, plan.get("project") or Path.home().resolve())
-        or directory.exists()
+        or (directory.exists() and plan.get("action") != "reuse")
     ):
         raise ValueError(
             "Runtime target/ancestor changed or target appeared; refusing overwrite"
@@ -372,125 +312,32 @@ def _verify_system_ucrt():
 
 
 def execute_runtime(plan, confirmed=False, emit=None, cancel_event=None, proxy=None):
-    emit = emit or (lambda event: None)
-    cancel_event = cancel_event or threading.Event()
-    proxy = proxy or ProxyConfig()
-    result = {
-        "schema_version": 1,
-        "operation": "runtime_install",
-        "status": "blocked",
-        "errors": [],
-        "warnings": [],
-        "directory": plan.get("directory"),
-        "plan_id": plan.get("plan_id"),
-    }
-    if not confirmed:
-        result["errors"].append(
-            "Runtime download/installer and license require explicit confirmation"
-        )
+    from .private_runtime import deploy
+    emit, cancel_event, proxy = emit or (lambda event: None), cancel_event or threading.Event(), proxy or ProxyConfig()
+    result = {"schema_version": 1, "operation": "runtime_install", "status": "blocked",
+              "directory": plan.get("directory"), "plan_id": plan.get("plan_id"), "errors": [], "warnings": [],
+              "installer_executed": False, "registry_changed": False}
+    if not confirmed and plan.get("action") != "reuse":
+        result["errors"].append("Explicit confirmation of the private Python download and license is required")
         return result
-    current = plan_runtime(plan["directory"], plan["backend"], proxy, project=plan.get("project"))
-    if current != plan or current["status"] != "ready":
-        result["errors"].append(
-            "Runtime plan is stale, altered or unsupported; confirm a fresh plan"
-        )
-        return result
-    if cancel_event.is_set():
-        result["status"] = "cancelled"
-        return result
-    # The official installer deploys vcruntime140*.dll beside python.exe, not
-    # necessarily into System32. Only system UCRT readiness is an OS prerequisite
-    # here; missing/old UCRT stays manual rather than deploying OS components.
     try:
-        _verify_system_ucrt()
-    except (AttributeError, OSError, KeyError):
-        result["errors"].append(
-            "Windows UCRT prerequisite is absent, too old or cannot be verified; user setup is required, no elevation attempted"
-        )
-        return result
-    directory = Path(plan["directory"])
-    lock = directory.parent / "runtime-install.lock"
-    descriptor = None
-    temporary = None
-    installer_invoked = False
-    outcome: dict[str, Any] = {}
-    try:
-        _verify_runtime_destination(plan)
-        if plan_runtime(plan["directory"], plan["backend"], proxy, project=plan.get("project")) != plan:
-            raise ValueError("Runtime destination changed before acquiring the lock")
-        directory.parent.mkdir(parents=True, exist_ok=True)
-        _verify_runtime_destination(plan)
-        descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        os.close(descriptor)
-        descriptor = -1
-        _verify_runtime_destination(plan)
-        temporary = Path(tempfile.mkdtemp(prefix="coat-runtime-", dir=directory.parent))
-        installer = Path(temporary) / "python-installer.exe"
-        emit({"event": "phase", "phase": "runtime_download"})
-        download_runtime(plan["artifact"], installer, proxy, cancel_event, emit)
         if cancel_event.is_set():
-            raise InterruptedError("Runtime download cancelled")
-        _verify_runtime_destination(plan)
-        if _registered_python_paths(plan["version"]):
-            raise ValueError("CPython registration appeared during download; refusing installer maintenance")
-        installer_log = directory.parent / ("python-install-" + uuid.uuid4().hex + ".log")
-        result["installer_log"] = str(installer_log)
-        emit({"event": "phase", "phase": "runtime_install", "installer_log": str(installer_log)})
-        installer_invoked = True
-        code = run_command(
-            installer_arguments(installer, directory, installer_log),
-            emit,
-            cancel_event,
-            proxy,
-            timeout=1800,
-            outcome=outcome,
-            temporary_directory=temporary,
-        )
-        if code:
-            result["status"] = "cancelled" if code == 130 else "failed"
-            result["errors"].append(
-                f"CPython installer returned {code}; no elevated retry"
-            )
-            result["warnings"].append(
-                "Runtime may be partially installed; inspect the directory before retry"
-            )
+            raise InterruptedError("Private Python deployment cancelled")
+        current = plan_runtime(plan["directory"], plan["backend"], proxy, project=plan.get("project"),
+                               runtime_mirror=plan.get("runtime_mirror", False))
+        if current != plan or current["status"] != "ready":
+            result["errors"].append("Runtime plan is stale, altered or unsupported; confirm a fresh plan")
             return result
-        python = directory / "python.exe"
-        identity = probe_python(python)
-        if (
-            identity["python"] != plan["version"]
-            or not identity["has_venv"]
-            or not identity["has_ensurepip"]
-            or Path(identity["prefix"]).resolve() != directory.resolve()
-        ):
-            raise ValueError(
-                "Installed runtime does not match pinned identity/venv/ensurepip requirements"
-            )
-        result.update(
-            status="success",
-            python=str(python),
-            identity={
-                key: identity[key] for key in ("python", "prefix", "executable")
-            },
-        )
-        result["warnings"].append("CPython license accepted: " + plan["license"])
-        return result
-    except (OSError, ValueError, TimeoutError) as exc:
+        identity = deploy(plan, runtime_manifest(),
+                          lambda artifact, path, cancel, log: download_runtime(artifact, path, proxy, cancel, log),
+                          probe_python, emit, cancel_event, _verify_runtime_destination)
+        directory = Path(plan["directory"])
+        if (identity.get("python") != plan["version"] or Path(identity["prefix"]).resolve() != directory.resolve()
+                or not identity.get("has_venv") or not identity.get("has_ensurepip")):
+            raise ValueError("Private Python installed identity/venv/pip verification failed")
+        result.update(status="success", python=str(directory / "python.exe"), identity=identity,
+                      downloaded=plan["action"] != "reuse", reused=plan["action"] == "reuse")
+    except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile, subprocess.SubprocessError) as exc:
         result["status"] = "cancelled" if cancel_event.is_set() else "failed"
         result["errors"].append(redact(str(exc), proxy))
-        return result
-    finally:
-        uncertain = installer_invoked and not (
-            outcome.get("started") is False
-            or (outcome.get("completed") is True and outcome.get("stopped") is False)
-        )
-        if uncertain:
-            result["warnings"].append("Installer termination is uncertain; lock and download are retained for manual inspection; no automatic retry")
-            result["retained_download"] = str(temporary)
-        elif temporary is not None:
-            shutil.rmtree(temporary)
-        if descriptor is not None:
-            if descriptor != -1:
-                os.close(descriptor)
-            if not uncertain:
-                lock.unlink(missing_ok=True)
+    return result

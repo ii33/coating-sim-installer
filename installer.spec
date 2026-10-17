@@ -13,7 +13,7 @@ a = Analysis([str(root / "installer.py")], pathex=[str(root)], binaries=[], data
              noarchive=False, optimize=1)
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, a.binaries, a.datas, [],
-          name="CoatingSimInstaller-v0.1.0-alpha.1-windows-x64", debug=False,
+          name="CoatingSimInstaller-v0.1.0-alpha.2-windows-x64", debug=False,
           bootloader_ignore_signals=False, strip=False, upx=False, console=False,
           disable_windowed_traceback=False, argv_emulation=False,
           target_arch=None, codesign_identity=None, entitlements_file=None,

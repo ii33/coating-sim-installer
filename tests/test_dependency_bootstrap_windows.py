@@ -59,11 +59,11 @@ class BootstrapSourceTests(unittest.TestCase):
 
     def test_only_documentation_validation_allows_official_fragment(self):
         manifest = json.loads((SCRIPT.parent / "runtime_manifest.json").read_text())
-        self.assertTrue(manifest["documentation"].endswith("#installing-without-ui"))
+        self.assertTrue(manifest["documentation"].endswith("#the-nuget-org-packages"))
         self.assertIn('Assert-CoatOfficialUri $manifest.documentation "docs.python.org" -AllowFragment', self.source)
         self.assertIn('($uri.Fragment -and -not $AllowFragment)', self.source)
-        self.assertIn('Assert-CoatOfficialUri $manifest.source)', self.source)
-        self.assertIn('Assert-CoatOfficialUri $property.Value.url)', self.source)
+        self.assertIn('Assert-CoatOfficialUri $manifest.source "www.nuget.org")', self.source)
+        self.assertIn('Assert-CoatOfficialUri $property.Value.url "api.nuget.org")', self.source)
         self.assertIn('Assert-CoatOfficialUri $Artifact.url', self.source)
         self.assertEqual(self.source.count("-AllowFragment"), 1)
 
@@ -116,13 +116,13 @@ class BootstrapSourceTests(unittest.TestCase):
 
     def test_default_bootstraps_manager_then_forwards_existing_operation(self):
         self.assertIn('if (-not $identity) {', self.source)
-        self.assertIn('$identity = Install-CoatRuntime $manifest', self.source)
+        self.assertIn('$identity = Install-CoatPrivateRuntime $manifest', self.source)
         self.assertIn('$arguments = @($ManagerArguments)', self.source)
         self.assertIn('if ($Cli) { "inspect" } else { "interactive" }', self.source)
         self.assertIn('if ($Gui) { $arguments = @("gui") + $arguments }', self.source)
         self.assertIn('if ($Cli -and $Gui)', self.source)
-        self.assertIn('Find-CoatPython $explicit $directory $architecture $requireGui', self.source)
-        self.assertIn('Install-CoatRuntime $manifest $architecture $directory $homeDirectory $proxy $requireGui', self.source)
+        self.assertNotIn('Find-CoatPython $explicit $directory $architecture $requireGui', self.source)
+        self.assertIn('Install-CoatPrivateRuntime $manifest $directory $homeDirectory $proxy $mirror', self.source)
         self.assertIn('return $result.ExitCode', self.source)
         self.assertNotIn("project-deploy --yes", self.source)
         self.assertNotIn("-m pip install", self.source)

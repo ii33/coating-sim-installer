@@ -59,11 +59,11 @@ try {
     $manifestPath = Join-Path (Split-Path -Parent $BootstrapScript) "runtime_manifest.json"
     $manifest = Read-CoatManifest $manifestPath
     $documentation = Assert-CoatOfficialUri $manifest.documentation "docs.python.org" -AllowFragment
-    Assert-CoatTest ($documentation.Fragment -eq "#installing-without-ui") "current official documentation anchor accepted"
+    Assert-CoatTest ($documentation.Fragment -eq "#the-nuget-org-packages") "current official documentation anchor accepted"
     Assert-CoatThrows { Assert-CoatOfficialUri $manifest.documentation "docs.python.org" } "fixed official HTTPS"
-    Assert-CoatThrows { Assert-CoatOfficialUri "https://docs.python.org/3.13/using/windows.html?token=unused#installing-without-ui" "docs.python.org" -AllowFragment } "fixed official HTTPS"
+    Assert-CoatThrows { Assert-CoatOfficialUri "https://docs.python.org/3.13/using/windows.html?token=unused#the-nuget-org-packages" "docs.python.org" -AllowFragment } "fixed official HTTPS"
     foreach ($artifact in $manifest.artifacts.PSObject.Properties) {
-        [void](Assert-CoatOfficialUri $artifact.Value.url)
+        [void](Assert-CoatOfficialUri $artifact.Value.url "api.nuget.org")
         Assert-CoatTest ($artifact.Value.sha256 -cmatch '^[0-9a-f]{64}$') "manifest hash"
     }
     foreach ($bad in @("http://www.python.org/file", "https://evil.example/file",
