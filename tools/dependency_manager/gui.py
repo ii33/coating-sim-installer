@@ -9,6 +9,7 @@ import sys
 import tempfile
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,8 @@ from .app_info import VERSION, icon_path
 from .download_progress import DownloadProgress, byte_text
 from .interactive import project_directory, run_interactive
 from .mirrors import ProxyConfig, redact, resolve_mirror
+from .project_operations import project_operation
+from .project_update import update_project
 from .python_setup import prepare_python
 from .runtime import managed_runtime_notice
 from .runtime_paths import unlinked_local_path
@@ -168,6 +171,8 @@ class DependencyManagerWindow:
         self.operation_finished = None
         self.completed_phases = set()
         self.active_phase = None
+        self.total_phases = len(PHASES)
+        self.operation_name = ""
         self._build()
         window.after(50, self._drain)
 
@@ -200,7 +205,9 @@ class DependencyManagerWindow:
         self.browse_button.grid(row=0, column=1, padx=(8, 0))
         self.install_button = ttk.Button(paths, text="安装", command=self.start)
         self.install_button.grid(row=0, column=2, padx=(8, 0))
-        self.controls.extend((self.path_entry, self.browse_button, self.install_button))
+        self.project_update_button = ttk.Button(paths, text="更新", command=lambda: self.start("project-update"))
+        self.project_update_button.grid(row=0, column=3, padx=(8, 0))
+        self.controls.extend((self.path_entry, self.browse_button, self.install_button, self.project_update_button))
         self.details_button = ttk.Button(body, text="详细选项 ▸", command=self.toggle_details)
         self.details_button.grid(row=3, column=0, sticky="w", pady=(0, 4))
         details = self.details_frame = ttk.LabelFrame(body, text="详细选项", padding=10)
@@ -236,7 +243,7 @@ class DependencyManagerWindow:
         tools.grid(row=5, column=0, sticky="ew")
         self.python_button = ttk.Button(tools, text="单独准备 Python", command=lambda: self.start("python"))
         self.python_button.pack(side="left", padx=(0, 8))
-        updates = ttk.Button(tools, text="检查更新", command=self.check_updates)
+        updates = ttk.Button(tools, text="检查安装器更新", command=self.check_updates)
         updates.pack(side="left", padx=(0, 8))
         self.update_button = ttk.Button(tools, text="打开新版页面", command=self.open_update_page, state="disabled")
         self.update_button.pack(side="left")
@@ -357,6 +364,10 @@ class DependencyManagerWindow:
         })
         session = self.session
         selected_backend = self.backend.get()
+        selected_source = self.source.get()
+        selected_development = self.development.get()
+        self.operation_name = operation
+        self.total_phases = 5 if operation == "project-update" else len(PHASES)
         self._show_progress()
         for control in self.controls:
             control.configure(state="disabled")
@@ -380,15 +391,28 @@ class DependencyManagerWindow:
             def review(plan):
                 session.send("plan", redact(json.dumps(plan, ensure_ascii=False, indent=2), ProxyConfig("env")))
             try:
-                if operation == "python":
-                    proxy = ProxyConfig("env")
-                    code, completion_details, summary = prepare_python(root, proxy, session.cancel_event, review, output, session.prompt, mirror=chosen_mirror)
-                else:
-                    code = run_interactive(root, output=output, prompt_fn=session.prompt,
-                                           phase_fn=lambda value: session.send("phase", value),
-                                           plan_fn=review, cancel_event=session.cancel_event, mirror=chosen_mirror,
-                                           backend=None if selected_backend == "auto" else selected_backend,
-                                           pipeline=True, event_fn=lambda value: session.send("progress", value))
+                with (nullcontext() if operation == "project-update" else project_operation(root)):
+                    if operation == "project-update":
+                        result = update_project(root, selected_source, mirror=chosen_mirror,
+                            backend=None if selected_backend == "auto" else selected_backend,
+                            development=selected_development, output=output,
+                            phase_fn=lambda value: session.send("phase", value),
+                            emit=lambda value: session.send("progress", value), cancel_event=session.cancel_event)
+                        code = 0 if result["status"] == "success" else 130 if result["status"] == "cancelled" else 2
+                        completion_details = redact(json.dumps(result, ensure_ascii=False, indent=2), ProxyConfig("env"))
+                        if code == 0:
+                            summary = ("主项目已是最新源码：" if result.get("up_to_date") else "主项目更新完成：") + result.get("current_version", "")
+                        else:
+                            summary = "主项目更新已取消；请查看恢复记录。" if code == 130 else "主项目更新失败：" + "; ".join(result.get("errors", []))
+                    elif operation == "python":
+                        proxy = ProxyConfig("env")
+                        code, completion_details, summary = prepare_python(root, proxy, session.cancel_event, review, output, session.prompt, mirror=chosen_mirror)
+                    else:
+                        code = run_interactive(root, output=output, prompt_fn=session.prompt,
+                                               phase_fn=lambda value: session.send("phase", value),
+                                               plan_fn=review, cancel_event=session.cancel_event, mirror=chosen_mirror,
+                                               backend=None if selected_backend == "auto" else selected_backend,
+                                               pipeline=True, event_fn=lambda value: session.send("progress", value))
             except (KeyboardInterrupt, EOFError):
                 code = 130
             except Exception as exc:
@@ -480,6 +504,8 @@ class DependencyManagerWindow:
                     self.download_progress.finish()
                     if self.last_code == 0 and self.active_phase is not None:
                         self.completed_phases.add(self.active_phase)
+                    if self.last_code == 0 and self.operation_name == "project-update":
+                        self.total_phases = max(1, len(self.completed_phases))
                     self.status.set(value.get("summary") or {0: "操作完成。详见日志中的目标环境与后端核验结果。", 130: "已取消；已写入文件保留，请查看日志后重试。"}.get(self.last_code, "安装失败（" + self.current_phase + "）；请查看日志中的原因。"))
                     self._append(self.status.get())
             if log_batch:
@@ -506,7 +532,7 @@ class DependencyManagerWindow:
         elapsed = int((self.operation_finished or time.monotonic()) - self.operation_started)
         snapshot = self.download_progress.snapshot()
         pieces = [f"已用 {elapsed // 60:02d}:{elapsed % 60:02d}",
-                  f"已完成阶段 {len(self.completed_phases)}/{len(PHASES)}"]
+                  f"已完成阶段 {len(self.completed_phases)}/{self.total_phases}"]
         if any(row["active"] for row in snapshot["components"].values()):
             pieces.append("总下载速度 " + byte_text(snapshot["speed"]) + "/s")
         transfers = []

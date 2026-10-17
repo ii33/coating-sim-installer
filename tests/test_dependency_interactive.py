@@ -28,6 +28,7 @@ def flow(monkeypatch, tmp_path):
         "inspect_environment": {"status": "success", "target": identity},
         "plan_launch_entries": {"status": "ready"},
         "execute_launch_entries": {"status": "success"},
+        "ensure_desktop_shortcut": {"status": "success", "path": "isolated QA desktop"},
     }
     for name, value in values.items():
         calls[name] = MagicMock(return_value=value)
@@ -145,7 +146,7 @@ def test_gui_review_includes_launch_intent_without_changing_executed_plan(flow):
     assert review["launch_entry_intent"] == {
         "path": str(root / "app" / ("launch-coating.cmd" if subject.sys.platform == "win32" else "launch-coating.sh")),
         "overwrite": False,
-        "desktop_shortcuts": False,
+        "desktop_shortcuts": subject.sys.platform == "win32",
     }
     assert "launch_entry_intent" not in backend_plan
     assert calls["execute_project_deployment"].call_args.args[0] is backend_plan

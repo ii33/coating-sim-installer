@@ -435,6 +435,7 @@ def test_one_click_full_flow_failure_retry_and_nonempty_container(window, monkey
         "inspect_environment": {"target": identity},
         "plan_launch_entries": {"status": "ready"},
         "execute_launch_entries": {"status": "success"},
+        "ensure_desktop_shortcut": {"status": "success", "path": "isolated QA desktop"},
     }
     calls = {}
     for name, value in values.items():
@@ -568,3 +569,44 @@ def test_cancel_ignores_queued_late_download_progress(window, monkeypatch, tmp_p
     release.set()
     pump(window, lambda: not app.busy)
     assert app.last_code == 130 and app.download_progress.snapshot()["speed"] == 0
+
+
+def test_default_update_button_updates_main_source_and_not_installer(window, monkeypatch, tmp_path):
+    calls = []
+    def update(root, provider, **kwargs):
+        calls.append((root, provider, kwargs))
+        kwargs["phase_fn"]("检查主项目最新源码")
+        kwargs["output"]("[主项目] latest main checked")
+        return {"status": "success", "up_to_date": False, "current_version": "dev.20261017.99"}
+    monkeypatch.setattr(gui, "update_project", update)
+    monkeypatch.setattr(gui, "check_installer_updates", lambda *a, **k: pytest.fail("not installer self-update"))
+    app = gui.DependencyManagerWindow(window, tmp_path / "selected")
+    window.deiconify()
+    window.update()
+    assert app.project_update_button.winfo_viewable() and not app.details_frame.winfo_viewable()
+    app.project_update_button.invoke()
+    app.project_update_button.invoke()
+    pump(window, lambda: not app.busy)
+    assert len(calls) == 1 and calls[0][1] == "cnb"
+    assert calls[0][2]["mirror"] == "tuna" and app.last_code == 0
+    assert "dev.20261017.99" in app.status.get()
+    assert "latest main checked" in app.log.get("1.0", "end")
+
+
+def test_project_update_noop_failure_and_cancel_are_clear(window, monkeypatch, tmp_path):
+    outcomes = iter([
+        {"status": "success", "up_to_date": True, "current_version": "dev.20261017.1"},
+        {"status": "failed", "errors": ["local source changes preserved"]},
+        {"status": "cancelled", "errors": ["cancelled"]},
+    ])
+    monkeypatch.setattr(gui, "update_project", lambda *a, **k: next(outcomes))
+    app = gui.DependencyManagerWindow(window, tmp_path / "update-results")
+    app.start("project-update")
+    pump(window, lambda: not app.busy)
+    assert app.last_code == 0 and "最新" in app.status.get()
+    app.start("project-update")
+    pump(window, lambda: not app.busy)
+    assert app.last_code == 2 and "local source changes preserved" in app.status.get()
+    app.start("project-update")
+    pump(window, lambda: not app.busy)
+    assert app.last_code == 130 and "取消" in app.status.get()

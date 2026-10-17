@@ -1,0 +1,274 @@
+import json
+import os
+import shutil
+import subprocess
+import threading
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+
+from tools.dependency_manager import desktop_shortcut as shortcuts
+from tools.dependency_manager import project_update as updater
+from tools.dependency_manager.mirrors import ProxyConfig
+from tools.dependency_manager.project_operations import project_operation
+
+
+@pytest.fixture
+def installation(tmp_path, monkeypatch):
+    git = os.environ.get('COATING_TEST_GIT') or shutil.which('git')
+    if not git:
+        pytest.skip('Git unavailable')
+    environment = {**os.environ, 'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_TERMINAL_PROMPT': '0'}
+    def command(directory, *args):
+        return subprocess.check_output([git, '-c', 'user.name=Installer QA', '-c', 'user.email=qa@example.invalid',
+            '-c', 'commit.gpgsign=false', '-C', str(directory), *args], env=environment, stderr=subprocess.STDOUT, text=True).strip()
+    remote = tmp_path / 'synthetic-remote'
+    remote.mkdir()
+    command(remote, 'init', '--quiet', '--initial-branch=main', '--template=')
+    (remote / 'coat_sim').mkdir()
+    (remote / 'coat_sim/version.txt').write_text('dev.20261017.1\n')
+    (remote / 'launcher.py').write_text('print("synthetic QA only")\n')
+    (remote / 'requirements.txt').write_text('')
+    (remote / 'source.py').write_text('value = 1\n')
+    (remote / '.gitignore').write_text('.venv/\nconfig/settings.json\ndata/runtime/\nlaunch-coating.cmd\n')
+    command(remote, 'add', '.')
+    command(remote, 'commit', '--quiet', '-m', 'initial synthetic project')
+    container = tmp_path / '隔离安装'
+    container.mkdir()
+    app = container / 'app'
+    command(container, 'clone', '--quiet', '--no-hardlinks', str(remote), str(app))
+    command(app, 'remote', 'set-url', 'origin', updater.deploy.REPOSITORY_URL)
+    (app / 'config').mkdir()
+    (app / 'config/settings.json').write_bytes(b'user-settings')
+    (app / 'data/runtime').mkdir(parents=True)
+    (app / 'data/runtime/result.bin').write_bytes(b'user-result')
+    (app / '.venv').mkdir()
+    (app / '.venv/keep').write_bytes(b'private-venv')
+    base = container / '.runtime/python'
+    base.mkdir(parents=True)
+    (base / 'keep').write_bytes(b'private-runtime')
+    before = command(app, 'rev-parse', 'HEAD')
+    real_run = updater.deploy._run_git
+    calls = []
+    def transport(executable, args, **kwargs):
+        args = list(args)
+        calls.append(args)
+        # Production URLs/config are unchanged. Only this test's Git transport is local.
+        mapped = [str(remote) if value in (updater.deploy.REPOSITORY_URL, updater.CNB_URL) else value for value in args]
+        if '--get-url' in args:
+            return args[-1] + '\n'
+        if 'fetch' in args or 'ls-remote' in args:
+            mapped = ['-c', 'protocol.file.allow=always', *mapped]
+        return real_run(executable, mapped, **kwargs)
+    monkeypatch.setattr(updater.deploy, '_run_git', transport)
+    monkeypatch.setattr(updater, 'discover_git', lambda **kwargs: git)
+    monkeypatch.setattr(updater.manager, 'inspect_environment', lambda *a, **k: {'target': {'valid': True, 'base_prefix': str(base)}})
+    monkeypatch.setattr(updater.private_runtime, 'inspect_owned', lambda *a, **k: {})
+    planner = MagicMock(return_value={'status': 'ready'})
+    execute = MagicMock(return_value={'status': 'success'})
+    desktop = MagicMock(return_value={'status': 'success', 'path': 'isolated-desktop/Coating Sim.lnk'})
+    monkeypatch.setattr(updater.manager, 'plan_environment', planner)
+    monkeypatch.setattr(updater.manager, 'execute_plan', execute)
+    monkeypatch.setattr(updater, 'ensure_desktop_shortcut', desktop)
+    def newer(extra=None, keep_version=False):
+        (remote / 'source.py').write_text('value = 2\n')
+        if not keep_version:
+            (remote / 'coat_sim/version.txt').write_text('dev.20261017.2\n')
+        if extra:
+            path = remote / extra
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('remote content\n')
+            command(remote, 'add', '-f', extra)
+        command(remote, 'add', '.')
+        command(remote, 'commit', '--quiet', '-m', 'new synthetic source')
+        return command(remote, 'rev-parse', 'HEAD')
+    def update(**kwargs):
+        return updater.update_project(container, proxy=ProxyConfig('none'), **kwargs)
+    def preserved():
+        assert (app / 'config/settings.json').read_bytes() == b'user-settings'
+        assert (app / 'data/runtime/result.bin').read_bytes() == b'user-result'
+        assert (app / '.venv/keep').read_bytes() == b'private-venv'
+        assert (base / 'keep').read_bytes() == b'private-runtime'
+    return locals()
+
+
+def test_forward_update_preserves_user_data_and_repeated_check_is_noop(installation):
+    f = installation
+    latest = f['newer']()
+    result = f['update']()
+    assert result['status'] == 'success', result
+    assert result['current_commit'] == latest and result['current_version'] == 'dev.20261017.2'
+    f['preserved']()
+    receipt = json.loads((f['app'] / '.git/coating-installer-update.json').read_text(encoding='utf-8'))
+    assert receipt['state'] == 'success' and receipt['new_commit'] == latest
+    assert f['planner'].call_args.args[5] == 'repair'
+    second = f['update']()
+    assert second['status'] == 'success' and second['up_to_date'] is True
+    f['execute'].assert_called_once()
+    f['preserved']()
+
+
+def test_main_commit_change_updates_even_when_version_text_unchanged(installation):
+    f = installation
+    latest = f['newer'](keep_version=True)
+    result = f['update'](provider='github')
+    assert result['status'] == 'success' and result['current_commit'] == latest
+
+
+def test_modified_tracked_source_stops_before_fetch(installation):
+    f = installation
+    f['newer']()
+    (f['app'] / 'source.py').write_text('user edit\n')
+    result = f['update']()
+    assert result['status'] == 'failed' and '本地源码修改' in str(result['errors'])
+    assert not any('fetch' in call for call in f['calls'])
+    assert (f['app'] / 'source.py').read_text() == 'user edit\n'
+    f['preserved']()
+
+
+def test_ignored_user_file_collision_blocks_checkout(installation):
+    f = installation
+    f['newer'](extra='config/settings.json')
+    result = f['update']()
+    assert result['status'] == 'failed' and '冲突' in str(result['errors'])
+    assert f['command'](f['app'], 'rev-parse', 'HEAD') == f['before']
+    f['preserved']()
+
+
+def test_local_commits_are_never_reset_to_remote(installation):
+    f = installation
+    f['newer']()
+    (f['app'] / 'local.py').write_text('my local commit\n')
+    f['command'](f['app'], 'add', 'local.py')
+    f['command'](f['app'], 'commit', '--quiet', '-m', 'local work')
+    local = f['command'](f['app'], 'rev-parse', 'HEAD')
+    result = f['update']()
+    assert result['status'] == 'failed'
+    assert f['command'](f['app'], 'rev-parse', 'HEAD') == local
+    assert (f['app'] / 'local.py').exists()
+
+
+@pytest.mark.parametrize('cancelled', [False, True])
+def test_dependency_failure_or_cancel_restores_old_source_under_lock(installation, cancelled):
+    f = installation
+    f['newer']()
+    cancel = threading.Event()
+    def fail(*args):
+        assert (f['container'] / '.app.coating-installer.lock').exists()
+        if cancelled:
+            cancel.set()
+        return {'status': 'cancelled' if cancelled else 'failed', 'errors': ['test dependency failure']}
+    f['execute'].side_effect = fail
+    result = f['update'](cancel_event=cancel)
+    assert result['status'] == ('cancelled' if cancelled else 'failed')
+    assert result['source_rolled_back'] is True
+    assert f['command'](f['app'], 'rev-parse', 'HEAD') == f['before']
+    assert f['command'](f['app'], 'rev-parse', '--abbrev-ref', 'HEAD') == 'main'
+    assert not (f['container'] / '.app.coating-installer.lock').exists()
+    f['preserved']()
+
+
+def test_shared_operation_lock_blocks_duplicate_update(installation):
+    f = installation
+    with project_operation(f['container']):
+        result = f['update']()
+        assert result['status'] == 'failed' and '已有安装或更新任务' in str(result['errors'])
+        assert (f['container'] / '.app.coating-installer.lock').exists()
+    assert not (f['container'] / '.app.coating-installer.lock').exists()
+
+
+def test_unknown_origin_and_nonempty_unknown_target_are_preserved(installation, tmp_path):
+    f = installation
+    f['command'](f['app'], 'remote', 'set-url', 'origin', 'https://example.invalid/other.git')
+    assert f['update']()['status'] == 'failed'
+    assert not any('fetch' in call for call in f['calls'])
+    f['preserved']()
+    unknown = tmp_path / 'unknown'
+    (unknown / 'app').mkdir(parents=True)
+    (unknown / 'app/keep').write_bytes(b'unknown')
+    assert updater.update_project(unknown)['status'] == 'failed'
+    assert (unknown / 'app/keep').read_bytes() == b'unknown'
+
+
+@pytest.fixture
+def desktop_install(tmp_path, monkeypatch):
+    root = tmp_path / '项目 space & 测试'
+    (root / '.git').mkdir(parents=True)
+    desktop = tmp_path / 'OneDrive' / '重定向桌面'
+    desktop.mkdir(parents=True)
+    base = {'status': 'ready', 'root': str(root), 'python': str(root / '.venv/Scripts/python.exe'),
+            'icon': str(root / 'coat_sim/ui/assets/icons/launcher.ico'), 'script': 'owned script'}
+    monkeypatch.setattr(shortcuts.sys, 'platform', 'win32')
+    monkeypatch.setattr(shortcuts.launchers, 'plan_launch_entries', lambda *a, **k: base)
+    known = MagicMock(return_value=desktop)
+    monkeypatch.setattr(shortcuts.launchers, '_known_folder', known)
+    writer = MagicMock(side_effect=lambda path, plan: path.write_bytes(b'fixture native link' * 10))
+    monkeypatch.setattr(shortcuts.launchers, '_write_shortcut', writer)
+    return root, desktop, writer, known
+
+
+def test_redirected_desktop_shortcut_is_created_once_and_reused(desktop_install):
+    root, desktop, writer, known = desktop_install
+    result = shortcuts.ensure_desktop_shortcut(root)
+    assert result['status'] == 'success', result
+    original = Path(result['path']).read_bytes()
+    second = shortcuts.ensure_desktop_shortcut(root)
+    assert second['status'] == 'success' and second['reused'] is True
+    writer.assert_called_once()
+    assert Path(result['path']).read_bytes() == original and len(list(desktop.glob('*.lnk'))) == 1
+    assert known.call_args.args == ('desktop',)
+    plan = writer.call_args.args[1]
+    assert '.venv' in plan['python'] and plan['icon'].endswith('launcher.ico')
+
+
+def test_unrelated_same_name_shortcut_uses_one_deterministic_alternate(desktop_install):
+    root, desktop, writer, known = desktop_install
+    primary = desktop / 'Coating Sim.lnk'
+    primary.write_bytes(b'unrelated shortcut')
+    first = shortcuts.ensure_desktop_shortcut(root)
+    second = shortcuts.ensure_desktop_shortcut(root)
+    assert first['status'] == second['status'] == 'success'
+    assert first['path'] == second['path'] and Path(first['path']) != primary
+    assert primary.read_bytes() == b'unrelated shortcut' and len(list(desktop.glob('*.lnk'))) == 2
+    writer.assert_called_once()
+
+
+def test_modified_owned_shortcut_and_unknown_receipt_are_not_overwritten(desktop_install):
+    root, desktop, writer, known = desktop_install
+    first = shortcuts.ensure_desktop_shortcut(root)
+    target = Path(first['path'])
+    target.write_bytes(b'user changed')
+    assert shortcuts.ensure_desktop_shortcut(root)['status'] == 'failed'
+    assert target.read_bytes() == b'user changed' and len(list(desktop.glob('*.lnk'))) == 1
+    marker = root / '.git/coating-installer-desktop.json'
+    marker.write_text('{"unrelated":true}')
+    assert shortcuts.ensure_desktop_shortcut(root)['status'] == 'failed'
+    assert marker.read_text() == '{"unrelated":true}'
+
+
+def test_assume_unchanged_source_cannot_be_silently_overwritten(installation):
+    f = installation
+    f["newer"]()
+    f["command"](f["app"], "update-index", "--assume-unchanged", "source.py")
+    (f["app"] / "source.py").write_text("hidden local edit\n")
+    result = f["update"]()
+    assert result["status"] == "failed" and "索引标记" in str(result["errors"])
+    assert (f["app"] / "source.py").read_text() == "hidden local edit\n"
+    assert not any("fetch" in call for call in f["calls"])
+
+
+def test_owned_shortcut_is_reused_after_desktop_redirect(desktop_install, tmp_path):
+    root, desktop, writer, known = desktop_install
+    first = shortcuts.ensure_desktop_shortcut(root)
+    relocated = tmp_path / "新的 OneDrive 桌面"
+    relocated.mkdir()
+    old_path = Path(first["path"])
+    new_path = relocated / old_path.name
+    old_path.rename(new_path)
+    known.return_value = relocated
+    second = shortcuts.ensure_desktop_shortcut(root)
+    assert second["status"] == "success" and second["reused"] is True
+    assert Path(second["path"]) == new_path
+    assert len(list(relocated.glob("*.lnk"))) == 1
+    writer.assert_called_once()

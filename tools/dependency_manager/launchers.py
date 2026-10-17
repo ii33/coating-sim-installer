@@ -231,6 +231,14 @@ Add-Type -TypeDefinition @'
 $s = Get-Content -LiteralPath $Spec -Raw -Encoding UTF8 | ConvertFrom-Json
 [CoatingLauncher.NativeShortcut]::Write($s.path, $s.python, $s.arguments, $s.root, $s.icon)
 if (-not (Test-Path -LiteralPath $s.path -PathType Leaf)) { throw 'Shortcut was not created' }
+$actual = [CoatingLauncher.NativeShortcut]::Read($s.path)
+if (-not [string]::Equals($actual[0], $s.python, [System.StringComparison]::OrdinalIgnoreCase) -or
+    -not [string]::Equals($actual[1], $s.arguments, [System.StringComparison]::Ordinal) -or
+    -not [string]::Equals($actual[2], $s.root, [System.StringComparison]::OrdinalIgnoreCase) -or
+    -not [string]::Equals($actual[3], ($s.icon + ',0'), [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Shortcut target/arguments/working directory/icon readback differs from the private project'
+}
+
 '''
 
 def _shortcut_output(value):

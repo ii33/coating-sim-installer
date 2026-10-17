@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .compute_recommendation import END_USER_GROUPS, recommend_environment
+from .desktop_shortcut import ensure_desktop_shortcut
 from .git_runtime import discover_git, execute_git_runtime, plan_git_runtime
 from .launchers import execute_launch_entries, plan_launch_entries
 from .manager import execute_plan, inspect_environment, plan_environment
@@ -318,7 +319,7 @@ def run_interactive(
                 "launch_entry_intent": {
                     "path": str(launch_path),
                     "overwrite": False,
-                    "desktop_shortcuts": False,
+                    "desktop_shortcuts": sys.platform == "win32",
                 },
             })
         if not yes("确认上述源码版本、目录、完整依赖及启动脚本计划，开始安装？", "install"):
@@ -380,6 +381,12 @@ def run_interactive(
                 show(launch_plan)
                 say("启动入口准备失败；冲突文件已保留，请查看以上诊断。")
                 return 2
+        if sys.platform == "win32":
+            desktop_result = ensure_desktop_shortcut(app)
+            if not success(desktop_result):
+                say("项目已安装，但桌面快捷方式未完成；请查看诊断，重试不会覆盖无关文件。")
+                return 2
+            say("桌面快捷方式：" + str(desktop_result.get("path", "")))
         if cancel.is_set():
             raise KeyboardInterrupt
         say(f"安装完成：{app}；可使用 {app / '.venv'} 中的 Python 启动 launcher.py。")
