@@ -43,7 +43,7 @@ def project_directory(root):
 
 def run_interactive(
     project=None, *, input_fn=input, output=print, cancel_event=None,
-    prompt_fn=None, phase_fn=None, plan_fn=None, mirror=None,
+    prompt_fn=None, phase_fn=None, plan_fn=None, mirror=None, backend=None,
 ):
     cancel = cancel_event or threading.Event()
     proxy = ProxyConfig("env")
@@ -208,7 +208,8 @@ def run_interactive(
                 return 2
             identity = target
         phase("recommend")
-        recommendation = recommend_environment(identity, cancel_event=cancel, proxy=proxy)
+        recommendation = recommend_environment(identity, cancel_event=cancel, proxy=proxy,
+                                               **({"manual_backend": backend} if backend else {}))
         if cancel.is_set() or recommendation.get("status") == "cancelled":
             raise KeyboardInterrupt
         show(recommendation)
@@ -325,10 +326,22 @@ def run_interactive(
             if success(launch_result):
                 say("启动脚本：" + str(launch_path))
             else:
-                say("依赖已安装，但启动脚本创建失败，请查看上面的诊断。")
+                say("依赖已安装，但启动脚本创建失败；请查看以上诊断。")
+                return 2
         else:
-            show(launch_plan)
-            say("启动脚本未创建；已有文件保持原样。")
+            # Repeat installation can reuse byte-identical installer scripts.
+            # Unknown/conflicting content is preserved and reported as failure.
+            expected = launch_plan.get("script")
+            errors = launch_plan.get("errors", [])
+            if (isinstance(expected, str) and len(errors) == 1
+                    and errors[0].startswith("Existing launch entry is preserved;")
+                    and launch_path.is_file() and unlinked_local_path(launch_path)
+                    and launch_path.read_bytes() == expected.encode("utf-8")):
+                say("复用已有启动脚本：" + str(launch_path))
+            else:
+                show(launch_plan)
+                say("启动入口准备失败；冲突文件已保留，请查看以上诊断。")
+                return 2
         if cancel.is_set():
             raise KeyboardInterrupt
         say(f"安装完成：{app}；可使用 {app / '.venv'} 中的 Python 启动 launcher.py。")

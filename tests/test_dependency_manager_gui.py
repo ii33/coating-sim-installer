@@ -177,25 +177,26 @@ def test_worker_uses_current_flow_snapshot_and_redacts_logs(window, monkeypatch,
     assert not (tmp_path / "new-install" / "app").exists()
 
 
-def test_close_cancels_waiting_worker_without_late_confirmation(window, monkeypatch, tmp_path):
+def test_close_cancels_install_worker_without_confirmation(window, monkeypatch, tmp_path):
+    entered = threading.Event()
+
     def fake_flow(project, **kwargs):
-        return 0 if kwargs["prompt_fn"]("install") == "y" else 130
+        assert kwargs["prompt_fn"]("install") == "y"
+        entered.set()
+        assert kwargs["cancel_event"].wait(3)
+        return 130
 
     monkeypatch.setattr(gui, "run_interactive", fake_flow)
     app = gui.DependencyManagerWindow(window, tmp_path / "new-install")
     app.start()
-    pump(window, lambda: app.confirmation is not None)
+    assert entered.wait(2)
     session = app.session
-    request = session.pending
+    assert session.pending is None and app.confirmation is None
     app.close()
     assert session.cancel_event.is_set()
-    assert request.answered.is_set()
-    assert not session.respond(request, True)
-    # Wait for the owned worker without touching other windows/processes.
     app.worker.join(timeout=2)
     assert not app.worker.is_alive()
-    assert app.closing
-    app.closing = False  # Keep fixture root alive for its normal cleanup.
+    app.closing = False
     pump(window, lambda: not app.busy)
     assert app.last_code == 130
 
@@ -249,25 +250,22 @@ def test_missing_tk_is_clear_and_nonzero(monkeypatch, capsys):
     assert "full Python with Tcl/Tk" in capsys.readouterr().err
 
 
-def test_confirmation_displays_complete_plan_independently_of_bounded_log(window, monkeypatch, tmp_path):
+def test_click_install_retains_full_plan_without_confirmation(window, monkeypatch, tmp_path):
     packages = [f"package-{index:05d}==1.0" for index in range(2000)]
 
     def flow(project, **kwargs):
         kwargs["plan_fn"]({"status": "ready", "packages": packages})
         kwargs["output"]("progress " * 5000)
-        return 0 if kwargs["prompt_fn"]("install") == "y" else 130
+        assert all(kwargs["prompt_fn"](key) == "y" for key in ("python", "git", "install"))
+        return 0
 
     monkeypatch.setattr(gui, "run_interactive", flow)
     app = gui.DependencyManagerWindow(window, tmp_path / "review")
-    app.start()
-    pump(window, lambda: app.confirmation is not None)
-    frame = app.confirmation.winfo_children()[0]
-    details = next(child for child in frame.winfo_children() if isinstance(child, tk.Text))
-    displayed = details.get("1.0", "end")
-    assert packages[0] in displayed and packages[-1] in displayed
-    assert len(displayed) > 32000
-    app.cancel()
+    app.install_button.invoke()
     pump(window, lambda: not app.busy)
+    assert packages[0] in app.current_plan and packages[-1] in app.current_plan
+    assert len(app.current_plan) > 32000
+    assert app.last_code == 0 and app.confirmation is None
 
 
 def test_close_waits_for_owned_worker_cleanup(window, monkeypatch, tmp_path):
@@ -331,14 +329,15 @@ def test_first_layout_wraps_using_actual_canvas_width(window, tmp_path):
             yield child
             yield from descendants(child)
 
-    gui.DependencyManagerWindow(window, tmp_path / "layout")
+    app = gui.DependencyManagerWindow(window, tmp_path / "layout")
+    app.toggle_details()
     window.geometry("800x680")
     window.deiconify()
     window.update()
     widgets = list(descendants(window))
     canvas = next(child for child in widgets if isinstance(child, tk.Canvas))
     hint = next(child for child in widgets if isinstance(child, gui.ttk.Label)
-                and str(child.cget("text")).startswith("新安装"))
+                and child is app.runtime_notice_label)
     assert 600 < int(hint.cget("wraplength")) <= canvas.winfo_width()
     window.geometry("460x500")
     window.update()
@@ -377,6 +376,7 @@ def test_cancelled_runtime_keeps_final_recovery_details_with_full_queue(window, 
 def test_managed_runtime_patch_status_is_visible_before_install(window, tmp_path):
     from tools.dependency_manager.runtime import runtime_manifest
     app = gui.DependencyManagerWindow(window, tmp_path / "uncreated")
+    app.toggle_details()
     window.deiconify()
     window.update()
     label = app.runtime_notice_label
@@ -389,3 +389,114 @@ def test_managed_runtime_patch_status_is_visible_before_install(window, tmp_path
     assert "非最新安全补丁" in notice
     assert "不扫描或复用系统 Python" in notice
     assert not app.busy and not (tmp_path / "uncreated").exists()
+
+
+def test_default_visible_controls_and_details_toggle(window, tmp_path):
+    app = gui.DependencyManagerWindow(window, tmp_path / "simple")
+    window.deiconify()
+    window.update()
+    assert app.path_entry.winfo_viewable() and app.browse_button.winfo_viewable()
+    assert app.install_button.winfo_viewable() and app.details_button.winfo_viewable()
+    assert not app.details_frame.winfo_viewable() and not app.progress_frame.winfo_viewable()
+    assert not app.python_button.winfo_viewable() and not app.backend_control.winfo_viewable()
+    assert app.source.get() == "cnb" and app.mirror.get() is True
+    assert app.development.get() is False and app.backend.get() == "auto"
+    app.details_button.invoke()
+    window.update()
+    assert app.details_frame.winfo_viewable() and app.backend_control.winfo_viewable()
+    app.source.set("github")
+    app.development.set(True)
+    app.details_button.invoke()
+    window.update()
+    assert not app.details_frame.winfo_viewable()
+    assert app.source.get() == "github" and app.development.get() is True
+    assert not (tmp_path / "simple").exists()
+
+
+def test_one_click_full_flow_failure_retry_and_nonempty_container(window, monkeypatch, tmp_path):
+    from unittest.mock import MagicMock
+
+    from tools.dependency_manager import interactive
+
+    root = tmp_path / "nonempty"
+    root.mkdir()
+    sentinel = root / "my-data.txt"
+    sentinel.write_bytes(b"must survive")
+    identity = {"valid": True, "executable": "/python", "python": "3.12.10"}
+    values = {
+        "plan_runtime": {"status": "ready", "action": "extract"},
+        "execute_runtime": {"status": "success", "python": "/python", "identity": identity},
+        "recommend_environment": {"status": "success", "selected_backend": "cpu"},
+        "discover_git": None,
+        "plan_git_runtime": {"status": "ready"},
+        "execute_git_runtime": {"status": "completed", "git": "/git"},
+        "plan_project_deployment": {"status": "ready"},
+        "execute_project_deployment": {"status": "success"},
+        "inspect_environment": {"target": identity},
+        "plan_launch_entries": {"status": "ready"},
+        "execute_launch_entries": {"status": "success"},
+    }
+    calls = {}
+    for name, value in values.items():
+        calls[name] = MagicMock(return_value=value)
+        monkeypatch.setattr(interactive, name, calls[name])
+    calls["execute_project_deployment"].side_effect = [
+        {"status": "failed", "errors": ["dependency network unavailable"]},
+        {"status": "success"},
+    ]
+    app = gui.DependencyManagerWindow(window, root)
+    app.install_button.invoke()
+    pump(window, lambda: not app.busy)
+    assert app.last_code == 2 and app.confirmation is None
+    assert "dependency network unavailable" in app.log.get("1.0", "end")
+    assert sentinel.read_bytes() == b"must survive"
+    app.install_button.invoke()
+    pump(window, lambda: not app.busy)
+    assert app.last_code == 0 and app.confirmation is None
+    assert sentinel.read_bytes() == b"must survive"
+    assert calls["execute_runtime"].call_args.args[1] is True
+    assert calls["execute_git_runtime"].call_args.args[1] is True
+    assert calls["execute_project_deployment"].call_args.kwargs["confirmed"] is True
+    plan = calls["plan_project_deployment"].call_args.kwargs
+    assert plan["source"] == "cnb" and plan["mirror"] == "tuna"
+    assert plan["profile"] == "runtime" and plan["groups"] == ("desktop", "appearance")
+    assert calls["plan_runtime"].call_args.kwargs["runtime_mirror"] is True
+    assert calls["plan_git_runtime"].call_args.kwargs["runtime_mirror"] is True
+    calls["execute_launch_entries"].assert_called_once()
+    assert not app.busy and str(app.install_button.cget("state")) == "normal"
+
+
+def test_one_click_cancel_without_any_confirmations(window, monkeypatch, tmp_path):
+    entered = threading.Event()
+
+    def flow(project, **kwargs):
+        assert kwargs["prompt_fn"]("python") == "y"
+        entered.set()
+        assert kwargs["cancel_event"].wait(3)
+        return 130
+
+    monkeypatch.setattr(gui, "run_interactive", flow)
+    app = gui.DependencyManagerWindow(window, tmp_path / "cancel")
+    app.install_button.invoke()
+    assert entered.wait(2)
+    assert app.confirmation is None
+    app.cancel_button.invoke()
+    pump(window, lambda: not app.busy)
+    assert app.last_code == 130
+    assert str(app.install_button.cget("state")) == "normal"
+
+
+def test_backend_snapshot_reaches_install_flow(window, monkeypatch, tmp_path):
+    received = []
+
+    def flow(project, **kwargs):
+        received.append(kwargs["backend"])
+        return 0
+
+    monkeypatch.setattr(gui, "run_interactive", flow)
+    app = gui.DependencyManagerWindow(window, tmp_path / "backend")
+    app.backend.set("cpu")
+    app.install_button.invoke()
+    app.backend.set("cuda13")
+    pump(window, lambda: not app.busy)
+    assert received == ["cpu"]

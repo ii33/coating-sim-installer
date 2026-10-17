@@ -128,17 +128,19 @@ class DependencyManagerWindow:
             window.iconbitmap(str(icon_path()))
         except (OSError, tk.TclError):
             pass
-        window.geometry("800x680")
-        window.minsize(460, 380)
+        window.geometry("720x250")
+        window.minsize(500, 230)
         window.protocol("WM_DELETE_WINDOW", self.close)
         self.directory = tk.StringVar(value=str(Path(project).absolute()))
         self.source = tk.StringVar(value="cnb")
-        self.explicit_mirror = mirror
-        initial_mirror = resolve_mirror(project, mirror)
+        self.explicit_mirror = mirror or "tuna"
+        initial_mirror = resolve_mirror(project, self.explicit_mirror)
         self.mirror = tk.BooleanVar(value=initial_mirror != "pypi")
         self.mirror_changed = False
         self.mirror.trace_add("write", lambda *unused: setattr(self, "mirror_changed", True))
         self.development = tk.BooleanVar(value=False)
+        self.backend = tk.StringVar(value="auto")
+        self.details_expanded = False
         self.update_channel = tk.StringVar(value="preview")
         self.update_page = None
         self.status = tk.StringVar(value="选择安装目录和来源，然后安装。Python 与项目 Qt 环境相互独立。")
@@ -160,7 +162,7 @@ class DependencyManagerWindow:
         return self.worker is not None
 
     def _build(self):
-        outer = ttk.Frame(self.window, padding=12)
+        outer = ttk.Frame(self.window, padding=16)
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(0, weight=1)
         outer.rowconfigure(0, weight=1)
@@ -173,80 +175,109 @@ class DependencyManagerWindow:
         body.columnconfigure(0, weight=1)
         item = canvas.create_window(0, 0, anchor="nw", window=body)
         body.bind("<Configure>", lambda event: canvas.configure(scrollregion=canvas.bbox("all")))
-        ttk.Label(body, text="在线安装", font=("Microsoft YaHei UI", 17, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 8))
-        ttk.Label(body, text="安装目录").grid(row=1, column=0, sticky="w")
+        ttk.Label(body, text="安装 Coating Sim", font=("Microsoft YaHei UI", 17, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 12))
+        ttk.Label(body, text="安装路径").grid(row=1, column=0, sticky="w")
         paths = ttk.Frame(body)
-        paths.grid(row=2, column=0, sticky="ew", pady=(4, 12))
+        paths.grid(row=2, column=0, sticky="ew", pady=(4, 8))
         paths.columnconfigure(0, weight=1)
-        entry = ttk.Entry(paths, textvariable=self.directory)
-        entry.grid(row=0, column=0, sticky="ew")
-        browse = ttk.Button(paths, text="选择…", command=self.choose_directory)
-        browse.grid(row=0, column=1, padx=(8, 0))
-        self.controls.extend((entry, browse))
-        sources = ttk.LabelFrame(body, text="源码来源", padding=8)
-        sources.grid(row=3, column=0, sticky="ew", pady=(0, 8))
-        for column, (label, value) in enumerate((("CNB（默认）", "cnb"), ("GitHub", "github"))):
-            button = ttk.Radiobutton(sources, text=label, variable=self.source, value=value)
-            button.grid(row=0, column=column, sticky="w", padx=(0, 16))
-            self.controls.append(button)
+        self.path_entry = ttk.Entry(paths, textvariable=self.directory)
+        self.path_entry.grid(row=0, column=0, sticky="ew")
+        self.browse_button = ttk.Button(paths, text="浏览…", command=self.choose_directory)
+        self.browse_button.grid(row=0, column=1, padx=(8, 0))
+        self.install_button = ttk.Button(paths, text="安装", command=self.start)
+        self.install_button.grid(row=0, column=2, padx=(8, 0))
+        self.controls.extend((self.path_entry, self.browse_button, self.install_button))
+        self.details_button = ttk.Button(body, text="详细选项 ▸", command=self.toggle_details)
+        self.details_button.grid(row=3, column=0, sticky="w", pady=(0, 4))
+        details = self.details_frame = ttk.LabelFrame(body, text="详细选项", padding=10)
+        details.grid(row=4, column=0, sticky="ew", pady=(4, 10))
+        details.columnconfigure(0, weight=1)
+        sources = ttk.Frame(details)
+        sources.grid(row=0, column=0, sticky="ew")
+        ttk.Label(sources, text="源码仓库：").pack(side="left")
+        for label, value in (("CNB（默认）", "cnb"), ("GitHub", "github")):
+            control = ttk.Radiobutton(sources, text=label, variable=self.source, value=value)
+            control.pack(side="left", padx=8)
+            self.controls.append(control)
         for row, label, variable in (
-            (4, "镜像加速（包索引默认清华 TUNA + Python 华为云；取消用官方源）", self.mirror),
-            (5, "开发环境（含测试与检查工具）", self.development),
+            (1, "镜像加速：Python、Git 本体、TUNA 依赖源", self.mirror),
+            (2, "安装开发依赖（测试和静态检查工具）", self.development),
         ):
-            control = ttk.Checkbutton(body, text=label, variable=variable)
+            control = ttk.Checkbutton(details, text=label, variable=variable)
             control.grid(row=row, column=0, sticky="w", pady=4)
             self.controls.append(control)
-        hint = ttk.Label(body, text="新安装会先准备源码，再确认依赖计划；已有 app 和虚拟环境会接受检查。代理沿用本次进程环境。\n" + managed_runtime_notice(), wraplength=680)
-        self.runtime_notice_label = hint
-        hint.grid(row=6, column=0, sticky="ew", pady=(8, 12))
-        ttk.Label(body, text="安装日志").grid(row=7, column=0, sticky="w")
-        log_frame = ttk.Frame(body)
-        log_frame.grid(row=8, column=0, sticky="ew", pady=4)
-        log_frame.columnconfigure(0, weight=1)
-        self.log = tk.Text(log_frame, wrap="word", height=10, width=1, state="disabled")
-        self.log.grid(row=0, column=0, sticky="ew")
-        log_scroll = ttk.Scrollbar(log_frame, command=self.log.yview)
-        log_scroll.grid(row=0, column=1, sticky="ns")
-        self.log.configure(yscrollcommand=log_scroll.set)
-        log_label = ttk.Label(body, textvariable=self.log_path, wraplength=680)
-        log_label.grid(row=9, column=0, sticky="ew", pady=4)
-        actions = ttk.Frame(outer, padding=(0, 10, 0, 0))
-        actions.grid(row=1, column=0, columnspan=2, sticky="ew")
-        actions.columnconfigure((0, 1), weight=1)
-        python = ttk.Button(actions, text="检查 / 准备 Python", command=lambda: self.start("python"))
-        python.grid(row=0, column=0, sticky="ew", padx=(0, 4), pady=3)
-        install = ttk.Button(actions, text="安装", command=self.start)
-        install.grid(row=0, column=1, sticky="ew", padx=(4, 0), pady=3)
-        self.controls.extend((python, install))
-        self.log_button = ttk.Button(actions, text="打开日志", command=self.open_log, state="disabled")
-        self.log_button.grid(row=1, column=0, sticky="ew", padx=(0, 4), pady=3)
-        self.cancel_button = ttk.Button(actions, text="取消", command=self.cancel, state="disabled")
-        self.cancel_button.grid(row=1, column=1, sticky="ew", padx=(4, 0), pady=3)
-        updates = ttk.Button(actions, text="检查更新（只读）", command=self.check_updates)
-        updates.grid(row=2, column=0, sticky="ew", padx=(0, 4), pady=3)
-        self.update_button = ttk.Button(actions, text="打开安装器新版下载页", command=self.open_update_page, state="disabled")
-        self.update_button.grid(row=2, column=1, sticky="ew", padx=(4, 0), pady=3)
-        channel = ttk.Frame(body)
-        channel.grid(row=10, column=0, sticky="ew", pady=4)
-        ttk.Label(channel, text="安装器更新渠道：").pack(side="left")
-        channels = ttk.Combobox(channel, textvariable=self.update_channel, values=("stable", "preview"), state="readonly", width=10)
+        device = ttk.Frame(details)
+        device.grid(row=3, column=0, sticky="ew", pady=4)
+        ttk.Label(device, text="计算设备：").pack(side="left")
+        self.backend_control = ttk.Combobox(device, textvariable=self.backend,
+            values=("auto", "cpu", "directml", "cuda12", "cuda13"), state="readonly", width=12)
+        self.backend_control.pack(side="left")
+        ttk.Label(device, text="auto 自动检测；不可用设备会明确报告").pack(side="left", padx=8)
+        self.controls.append(self.backend_control)
+        hint = self.runtime_notice_label = ttk.Label(details,
+            text="安装将自动准备 Python、Git、源码、依赖和启动入口。已有文件不会被覆盖。\n" + managed_runtime_notice(),
+            wraplength=640)
+        hint.grid(row=4, column=0, sticky="ew", pady=8)
+        tools = ttk.Frame(details)
+        tools.grid(row=5, column=0, sticky="ew")
+        self.python_button = ttk.Button(tools, text="单独准备 Python", command=lambda: self.start("python"))
+        self.python_button.pack(side="left", padx=(0, 8))
+        updates = ttk.Button(tools, text="检查更新", command=self.check_updates)
+        updates.pack(side="left", padx=(0, 8))
+        self.update_button = ttk.Button(tools, text="打开新版页面", command=self.open_update_page, state="disabled")
+        self.update_button.pack(side="left")
+        self.controls.extend((self.python_button, updates))
+        channel = ttk.Frame(details)
+        channel.grid(row=6, column=0, sticky="ew", pady=(8, 0))
+        ttk.Label(channel, text="安装器更新通道：").pack(side="left")
+        channels = ttk.Combobox(channel, textvariable=self.update_channel, values=("stable", "preview"), state="readonly", width=12)
         channels.pack(side="left")
-        ttk.Label(channel, text="stable＝正式版；preview＝含预发布").pack(side="left", padx=6)
-        self.controls.append(updates)
-        status = ttk.Label(outer, textvariable=self.status, wraplength=700)
-        status.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-
-        def wrap(event):
-            status.configure(wraplength=max(150, event.width - 24))
+        self.controls.append(channels)
+        details.grid_remove()
+        progress = self.progress_frame = ttk.Frame(body)
+        progress.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+        progress.columnconfigure(0, weight=1)
+        self.progress_bar = ttk.Progressbar(progress, mode="indeterminate")
+        self.progress_bar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        self.cancel_button = ttk.Button(progress, text="取消", command=self.cancel, state="disabled")
+        self.cancel_button.grid(row=0, column=1, padx=(8, 0), pady=(0, 8))
+        self.log = tk.Text(progress, wrap="word", height=9, width=1, state="disabled")
+        self.log.grid(row=1, column=0, columnspan=2, sticky="ew")
+        log_label = ttk.Label(progress, textvariable=self.log_path, wraplength=640)
+        log_label.grid(row=2, column=0, sticky="ew", pady=4)
+        self.log_button = ttk.Button(progress, text="打开日志", command=self.open_log, state="disabled")
+        self.log_button.grid(row=2, column=1, padx=(8, 0))
+        progress.grid_remove()
+        self.status.set("默认启用全部镜像加速，点击安装即可开始。")
+        status = ttk.Label(outer, textvariable=self.status, wraplength=660)
+        status.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
         def fit_body(event):
             canvas.itemconfigure(item, width=event.width)
             for label in (hint, log_label):
-                label.configure(wraplength=max(150, event.width - 24))
+                label.configure(wraplength=max(150, event.width - 40))
+            status.configure(wraplength=max(150, event.width - 24))
 
-        outer.bind("<Configure>", wrap)
         canvas.bind("<Configure>", fit_body)
         self.window.bind("<Escape>", lambda event: self.cancel())
+
+    def toggle_details(self):
+        self.details_expanded = not self.details_expanded
+        if self.details_expanded:
+            self.details_frame.grid()
+        else:
+            self.details_frame.grid_remove()
+        self.details_button.configure(text="详细选项 ▾" if self.details_expanded else "详细选项 ▸")
+        self._resize()
+
+    def _resize(self):
+        height = 250 + (340 if self.details_expanded else 0) + (250 if self.progress_frame.winfo_manager() else 0)
+        self.window.geometry(f"{max(720, self.window.winfo_width())}x{min(height, self.window.winfo_screenheight() - 100)}")
+
+    def _show_progress(self):
+        self.progress_frame.grid()
+        self.progress_bar.start(12)
+        self._resize()
 
     def choose_directory(self):
         selected = filedialog.askdirectory(parent=self.window, initialdir=self.directory.get())
@@ -295,8 +326,12 @@ class DependencyManagerWindow:
             "directory": str(root), "source": "1" if self.source.get() == "cnb" else "2",
             "mirror": "y" if chosen_mirror != "pypi" else "n",
             "development": "y" if self.development.get() else "n",
+            # Clicking Install authorizes these bounded project-local steps only.
+            **({"python": "y", "git": "y", "install": "y"} if operation == "install" else {}),
         })
         session = self.session
+        selected_backend = self.backend.get()
+        self._show_progress()
         for control in self.controls:
             control.configure(state="disabled")
         self.cancel_button.configure(state="normal")
@@ -325,7 +360,8 @@ class DependencyManagerWindow:
                 else:
                     code = run_interactive(root, output=output, prompt_fn=session.prompt,
                                            phase_fn=lambda value: session.send("phase", value),
-                                           plan_fn=review, cancel_event=session.cancel_event, mirror=chosen_mirror)
+                                           plan_fn=review, cancel_event=session.cancel_event, mirror=chosen_mirror,
+                                           backend=None if selected_backend == "auto" else selected_backend)
             except (KeyboardInterrupt, EOFError):
                 code = 130
             except Exception as exc:
@@ -411,6 +447,8 @@ class DependencyManagerWindow:
             for control in self.controls:
                 control.configure(state="normal")
             self.cancel_button.configure(state="disabled")
+            self.progress_bar.stop()
+            self.backend_control.configure(state="readonly")
             self.update_button.configure(state="normal" if self.update_page else "disabled")
             if self.closing:
                 self.window.destroy()
@@ -430,6 +468,7 @@ class DependencyManagerWindow:
         self.log.configure(state="normal")
         self.log.delete("1.0", "end")
         self.log.configure(state="disabled")
+        self._show_progress()
         self.session = InstallerSession({})
         session = self.session
         self.last_code = None

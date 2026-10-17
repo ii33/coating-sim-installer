@@ -283,7 +283,7 @@ def test_launch_script_creation_is_included_and_existing_files_are_preserved(flo
         "status": "blocked",
         "errors": ["existing script preserved"],
     }
-    assert run(["", "", "", "", "y"]) == 0
+    assert run(["", "", "", "", "y"]) == 2
     calls["execute_launch_entries"].assert_not_called()
     calls["plan_launch_entries"].assert_called_once_with(root / "app", name="launch-coating")
 
@@ -388,3 +388,24 @@ def test_optional_display_fields_do_not_assume_mapping_or_list(flow):
     assert "single warning" in lines and "blocked reason" in lines
     assert any("unclassified device" in line and "example GPU" in line for line in lines)
     calls["execute_project_deployment"].assert_not_called()
+
+
+def test_repeat_install_reuses_identical_launcher_only(flow):
+    root, calls, run = flow
+    make_project(root / "app")
+    script = root / "app" / ("launch-coating.cmd" if subject.sys.platform == "win32" else "launch-coating.sh")
+    script.write_bytes(b"known script")
+    calls["plan_launch_entries"].return_value = {"status": "blocked", "script": "known script",
+        "errors": ["Existing launch entry is preserved; choose another name: " + str(script)]}
+    assert run(["", "", "", "", "y"]) == 0
+    assert script.read_bytes() == b"known script"
+    calls["execute_launch_entries"].assert_not_called()
+    script.write_bytes(b"user changed")
+    assert run(["", "", "", "", "y"]) == 2
+    assert script.read_bytes() == b"user changed"
+
+
+def test_failed_launch_creation_is_not_reported_as_install_success(flow):
+    root, calls, run = flow
+    calls["execute_launch_entries"].return_value = {"status": "failed", "errors": ["disk full"]}
+    assert run(["", "", "", "", "y"]) == 2
