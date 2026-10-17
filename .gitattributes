@@ -1,0 +1,6 @@
+* text=auto eol=lf
+*.ico -text
+*.exe -text
+*.dll -text
+*.pyd -text
+tools/dependency_manager/licenses/** -text -whitespace
