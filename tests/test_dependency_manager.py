@@ -283,7 +283,7 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(plan["status"], "ready")
         self.assertEqual(
             [a["kind"] for a in plan["actions"]],
-            ["create_venv", "resolve_wheels", "pip_install"],
+            ["create_venv", "resolve_wheels", "pip_install", "compile_bytecode"],
         )
         self.assertIn("--dry-run", plan["actions"][1]["argv"])
         self.assertNotIn("--trusted-host", str(plan))
@@ -299,8 +299,8 @@ class ManagerTests(unittest.TestCase):
                 self.root, groups=("sandbox",), action="repair", proxy=self.proxy
             )
         self.assertFalse(install["actions"])
-        self.assertIn("pygal==3.0.5", repair["actions"][-1]["argv"])
-        self.assertNotIn("zipp==4.1.0", repair["actions"][-1]["argv"])
+        self.assertIn("pygal==3.0.5", next(a["argv"] for a in repair["actions"] if a["kind"] == "pip_install"))
+        self.assertNotIn("zipp==4.1.0", next(a["argv"] for a in repair["actions"] if a["kind"] == "pip_install"))
 
     def test_missing_pip_only_repair_uses_ensurepip(self):
         data = self.fake_venv()

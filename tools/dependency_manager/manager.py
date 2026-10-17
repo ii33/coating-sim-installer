@@ -505,6 +505,7 @@ def plan_environment(
         bootstrap_python=str(python or ""),
     )
     target = result["target"]
+    bootstrap_pip = None
     dml_required = any(row["name"] == "torch-directml" for row in result["packages"])
     discovery_backend = "directml" if dml_required else backend
     if not target["exists"] and not python:
@@ -554,6 +555,7 @@ def plan_environment(
         else:
             try:
                 bootstrap = probe_python(python)
+                bootstrap_pip = bootstrap.get("bundled_pip")
                 if dml_required and not (
                     bootstrap.get("platform") == "win32"
                     and re.match(r"3\.1[0-2]\.", bootstrap.get("python", ""))
@@ -634,6 +636,7 @@ def plan_environment(
         result["errors"].append(
             "Target pip is older than 22.2 and lacks wheel dry-run; explicitly update pip with its official installer before retry"
         )
+    progress_args = ["--progress-bar", "raw"] if _satisfies(target.get("pip") or bootstrap_pip or "0", ">=25.0") else []
     if selected:
         result["actions"].append(
             {
@@ -646,6 +649,7 @@ def plan_environment(
                     "--isolated",
                     "install",
                     "--dry-run",
+                    *progress_args,
                     "--disable-pip-version-check",
                     "--no-input",
                     "--only-binary=:all:",
@@ -665,6 +669,8 @@ def plan_environment(
                     "pip",
                     "--isolated",
                     "install",
+                    "--no-compile",
+                    *progress_args,
                     "--disable-pip-version-check",
                     "--no-input",
                     "--only-binary=:all:",
@@ -674,6 +680,12 @@ def plan_environment(
                 ],
             }
         )
+        result["actions"].append({
+            "kind": "compile_bytecode",
+            "argv": [target["interpreter"], "-I", "-m", "compileall", "-q", "-j", str(min(4, os.cpu_count() or 1)),
+                     str(Path(target["venv"]) / ("Lib/site-packages" if sys.platform == "win32" else
+                         f"lib/python{(target.get('python') or result.get('bootstrap_identity', {}).get('python') or platform.python_version()).rsplit('.', 1)[0]}/site-packages"))],
+        })
     result["status"] = "blocked" if result["errors"] else "ready"
     result["warnings"].append(
         "Resolver may replace selected packages and their dependencies; no explicit unrelated-package removal"
@@ -717,22 +729,48 @@ def run_command(argv, emit, cancel_event, proxy=None, timeout=900, *, outcome=No
     )
     if outcome is not None:
         outcome["started"] = True
-    logs: queue.Queue[str] = queue.Queue()
+    logs: queue.Queue[str] = queue.Queue(maxsize=256)
+    reader_stop = threading.Event()
+    transfer_number = 0
+    is_pip = "-m" in argv and argv[argv.index("-m") + 1:argv.index("-m") + 2] == ["pip"]
 
     def reader():
         assert process.stdout is not None
         for line in process.stdout:
-            logs.put(line)
+            while not reader_stop.is_set():
+                try:
+                    logs.put(line[:32000], timeout=0.1)
+                    break
+                except queue.Full:
+                    continue
+            if reader_stop.is_set():
+                break
         process.stdout.close()
 
     thread = threading.Thread(target=reader, daemon=True)
     thread.start()
+    def output_line(line):
+        nonlocal transfer_number
+        progress = re.fullmatch(r"Progress (\d+) of (\d+)", line.strip()) if is_pip else None
+        if progress:
+            count, total = map(int, progress.groups())
+            if count == 0:
+                transfer_number += 1
+            emit({"event": "progress", "phase": "dependency_download", "component": "依赖下载",
+                  "source": f"pip-{transfer_number}", "download_bytes": count,
+                  "total_bytes": total or None, "transfer_finished": bool(total and count == total)})
+        else:
+            if is_pip and line.startswith(("Installing collected packages:", "Successfully installed")):
+                emit({"event": "progress", "phase": "dependency_download", "component": "依赖下载",
+                      "transfer_finished": True})
+            emit({"event": "log", "component": "依赖", "text": redact(line.rstrip(), proxy)})
+
     start = time.monotonic()
     stopped = False
-    while process.poll() is None or not logs.empty():
+    while process.poll() is None or not logs.empty() or (thread.is_alive() and not stopped):
         try:
             line = logs.get(timeout=0.05)
-            emit({"event": "log", "text": redact(line.rstrip(), proxy)})
+            output_line(line)
         except queue.Empty:
             pass
         if (
@@ -800,9 +838,10 @@ def run_command(argv, emit, cancel_event, proxy=None, timeout=900, *, outcome=No
                     "text": "Cancelled/timed out. Changes may be partial; reinspect before retry.",
                 }
             )
+    reader_stop.set()
     thread.join(timeout=1)
     while not logs.empty():
-        emit({"event": "log", "text": redact(logs.get_nowait().rstrip(), proxy)})
+        output_line(logs.get_nowait())
     if stopped:
         if outcome is not None:
             outcome["parent_exited"] = process.poll() is not None
@@ -936,7 +975,12 @@ def execute_plan(plan, confirmed=False, emit=None, cancel_event=None, proxy=None
                     "Target appeared after confirmation; refusing venv overwrite"
                 )
             emit({"event": "phase", "phase": action["kind"]})
+            action_started = time.perf_counter()
             code = run_command(action["argv"], emit, cancel_event, proxy)
+            elapsed = time.perf_counter() - action_started
+            result.setdefault("timings", []).append({"phase": action["kind"], "seconds": elapsed})
+            emit({"event": "timing", "phase": action["kind"], "seconds": elapsed,
+                  "text": f"{action['kind']}: {elapsed:.2f}s"})
             if code:
                 result["status"] = (
                     "cancelled" if cancel_event.is_set() or code == 130 else "failed"

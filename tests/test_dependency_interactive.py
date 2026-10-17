@@ -409,3 +409,64 @@ def test_failed_launch_creation_is_not_reported_as_install_success(flow):
     root, calls, run = flow
     calls["execute_launch_entries"].return_value = {"status": "failed", "errors": ["disk full"]}
     assert run(["", "", "", "", "y"]) == 2
+
+
+def test_verified_python_extract_overlaps_git_and_source_waits(flow):
+    import threading
+    root, calls, _ = flow
+    git_started = threading.Event()
+    python_done = threading.Event()
+    calls["discover_git"].return_value = None
+    original_python = calls["execute_runtime"].return_value
+
+    def python(plan, confirmed, emit, cancel, proxy):
+        assert not git_started.is_set()
+        emit({"event": "phase", "phase": "runtime_extract"})
+        assert git_started.wait(2)
+        python_done.set()
+        return original_python
+
+    def git(plan, confirmed, emit, cancel, proxy):
+        git_started.set()
+        assert python_done.wait(2)
+        return {"status": "completed", "git": "/git"}
+
+    def source(*args, **kwargs):
+        assert python_done.is_set() and git_started.is_set()
+        assert kwargs["git_path"] == "/git"
+        return {"status": "ready"}
+
+    calls["execute_runtime"].side_effect = python
+    calls["execute_git_runtime"].side_effect = git
+    calls["plan_project_deployment"].side_effect = source
+    choices = {"directory": str(root), "source": "1", "mirror": "y", "development": "n", "python": "y", "git": "y", "install": "y"}
+    assert subject.run_interactive(root, prompt_fn=lambda key,*unused: choices[key], output=lambda value: None, pipeline=True) == 0
+
+
+def test_pipeline_failure_joins_owned_worker_without_turning_failure_into_cancel(flow):
+    import threading
+    root, calls, _ = flow
+    started, stopped = threading.Event(), threading.Event()
+    cancel = threading.Event()
+    calls["discover_git"].return_value = None
+
+    def python(plan, confirmed, emit, cancel, proxy):
+        emit({"event": "phase", "phase": "runtime_extract"})
+        assert started.wait(2)
+        return {"status": "failed", "errors": ["bad runtime archive"]}
+
+    def git(plan, confirmed, emit, local_cancel, proxy):
+        started.set()
+        for _ in range(200):
+            if local_cancel.is_set():
+                stopped.set()
+                return {"status": "cancelled"}
+            stopped.wait(0.01)
+        raise AssertionError("pipeline worker leaked")
+
+    calls["execute_runtime"].side_effect = python
+    calls["execute_git_runtime"].side_effect = git
+    choices = {"directory": str(root), "source": "1", "mirror": "y", "development": "n", "python": "y", "git": "y", "install": "y"}
+    assert subject.run_interactive(root, prompt_fn=lambda key,*unused: choices[key], output=lambda value: None, pipeline=True, cancel_event=cancel) == 2
+    assert stopped.is_set() and not cancel.is_set()
+    calls["plan_project_deployment"].assert_not_called()

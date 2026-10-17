@@ -7,7 +7,9 @@ import signal
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .compute_recommendation import END_USER_GROUPS, recommend_environment
@@ -15,6 +17,7 @@ from .git_runtime import discover_git, execute_git_runtime, plan_git_runtime
 from .launchers import execute_launch_entries, plan_launch_entries
 from .manager import execute_plan, inspect_environment, plan_environment
 from .mirrors import MIRRORS, ProxyConfig, redact, resolve_mirror
+from .parallel_work import LinkedCancellation
 from .project_deploy import execute_project_deployment, plan_project_deployment
 from .runtime import default_runtime_directory, execute_runtime, plan_runtime
 from .runtime_paths import unlinked_local_path
@@ -43,12 +46,19 @@ def project_directory(root):
 
 def run_interactive(
     project=None, *, input_fn=input, output=print, cancel_event=None,
-    prompt_fn=None, phase_fn=None, plan_fn=None, mirror=None, backend=None,
+    prompt_fn=None, phase_fn=None, plan_fn=None, mirror=None, backend=None, pipeline=False, event_fn=None,
 ):
     cancel = cancel_event or threading.Event()
     proxy = ProxyConfig("env")
+    pipeline_pool = None
+    git_future = None
+    git_cancel = LinkedCancellation(cancel)
+    progress_times = {}
+    progress_lock = threading.Lock()
 
     def say(message):
+        if threading.current_thread().name.startswith("coating-git") and not str(message).startswith("["):
+            message = "[Git] " + str(message)
         output(redact(str(message), proxy))
 
     def phase(name):
@@ -68,8 +78,42 @@ def run_interactive(
     def yes(prompt, key=""):
         return ask(prompt + " [y/N]：", key=key).lower() in ("y", "yes", "是")
 
+    def prepare_git():
+        found = discover_git(project=root)
+        if found:
+            return found
+        git_plan = plan_git_runtime(proxy=proxy, project=root, runtime_mirror=mirror != "pypi")
+        if not ready(git_plan):
+            raise ValueError("Git preparation plan failed; existing files preserved")
+        if not yes("准备并校验项目私有 Git？", "git"):
+            raise KeyboardInterrupt
+        result = operation(execute_git_runtime, git_plan, True, emit, git_cancel, proxy)
+        if not success(result):
+            raise ValueError("Git preparation failed; see component diagnostics")
+        return result["git"]
+
     def emit(event):
-        say(event.get("text") or event.get("phase") or json.dumps(event, ensure_ascii=False))
+        nonlocal pipeline_pool, git_future
+        stage = event.get("phase", "")
+        component = event.get("component") or ("Git" if "git" in stage else
+                    "Python" if "runtime" in stage else "依赖")
+        event = dict(event, component=component)
+        now = time.monotonic()
+        progress = event.get("event") == "progress" and "download_bytes" in event
+        with progress_lock:
+            last = progress_times.get(component, 0)
+            deliver = not progress or now - last >= 0.2
+            if deliver:
+                progress_times[component] = now
+        if deliver and event_fn is not None:
+            event_fn(event)
+        if not progress:
+            say("[" + component + "] " + str(event.get("text") or stage or json.dumps(event, ensure_ascii=False)))
+        # Begin the next independent component only after Python has completely
+        # downloaded and passed its pinned archive hash. Source checkout still waits for Git.
+        if pipeline and prompt_fn is not None and stage == "runtime_extract" and git_future is None and not app.exists():
+            pipeline_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="coating-git")
+            git_future = pipeline_pool.submit(prepare_git)
 
     def operation(function, *args, **kwargs):
         # Core operations own subprocess cleanup. Set their cancellation event
@@ -77,9 +121,13 @@ def run_interactive(
         previous = None
         if threading.current_thread() is threading.main_thread():
             previous = signal.signal(signal.SIGINT, lambda *unused: cancel.set())
+        started = time.perf_counter()
+        operation_name = getattr(function, "__name__", type(function).__name__)
         try:
             return function(*args, **kwargs)
         finally:
+            emit({"event": "timing", "phase": operation_name, "seconds": time.perf_counter() - started,
+                  "text": f"{operation_name}: {time.perf_counter() - started:.2f}s"})
             if previous is not None:
                 signal.signal(signal.SIGINT, previous)
 
@@ -232,17 +280,7 @@ def run_interactive(
             )
             execute = execute_plan
         else:
-            git = discover_git(project=root)
-            if not git:
-                git_plan = plan_git_runtime(proxy=proxy, project=root, runtime_mirror=mirror != "pypi")
-                if not ready(git_plan):
-                    return 2
-                if not yes("缺少 Git；确认上述校验计划，在安装目录内安装官方私有 Git？", "git"):
-                    return 130
-                result = operation(execute_git_runtime, git_plan, True, emit, cancel, proxy)
-                if not success(result):
-                    return 130 if cancel.is_set() else 2
-                git = result["git"]
+            git = git_future.result() if git_future is not None else prepare_git()
             # Only create the container. Core deployment still requires a new app.
             root.mkdir(parents=True, exist_ok=True)
             phase("source")
@@ -353,3 +391,7 @@ def run_interactive(
     except (ValueError, OSError, RuntimeError) as exc:
         say("安装失败：" + str(exc))
         return 2
+    finally:
+        if pipeline_pool is not None:
+            git_cancel.set()
+            pipeline_pool.shutdown(wait=True, cancel_futures=True)

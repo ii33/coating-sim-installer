@@ -500,3 +500,71 @@ def test_backend_snapshot_reaches_install_flow(window, monkeypatch, tmp_path):
     app.backend.set("cuda13")
     pump(window, lambda: not app.busy)
     assert received == ["cpu"]
+
+
+def test_live_progress_and_logs_are_automatic_and_speeds_clear_on_finish(window, monkeypatch, tmp_path):
+    entered, release = threading.Event(), threading.Event()
+
+    def flow(project, **kwargs):
+        assert kwargs["pipeline"] is True
+        kwargs["phase_fn"]("python")
+        kwargs["event_fn"]({"component": "Python", "phase": "runtime_download", "download_bytes": 1024, "total_bytes": 4096})
+        kwargs["output"]("[Python] test https://user:secret@example.test/path?token=private")
+        entered.set()
+        assert release.wait(3)
+        kwargs["phase_fn"]("source")
+        return 0
+
+    monkeypatch.setattr(gui, "run_interactive", flow)
+    app = gui.DependencyManagerWindow(window, tmp_path / "progress")
+    window.deiconify()
+    window.update()
+    assert not app.progress_frame.winfo_viewable()
+    app.install_button.invoke()
+    assert entered.wait(2)
+    pump(window, lambda: "1.0 KiB" in app.progress_detail.get())
+    assert app.progress_frame.winfo_viewable() and app.progress_bar.winfo_viewable()
+    assert app.log.winfo_viewable() and app.progress_label.winfo_viewable()
+    assert not app.details_frame.winfo_viewable()
+    assert "已用" in app.progress_detail.get() and "4.0 KiB" in app.progress_detail.get()
+    assert "%" not in app.progress_detail.get()
+    displayed = app.log.get("1.0", "end")
+    assert "secret" not in displayed and "private" not in displayed
+    app.copy_log()
+    assert "secret" not in window.clipboard_get()
+    destination = tmp_path / "saved.log"
+    monkeypatch.setattr(gui.filedialog, "asksaveasfilename", lambda **kwargs: str(destination))
+    app.save_log()
+    assert "secret" not in destination.read_text(encoding="utf-8")
+    release.set()
+    pump(window, lambda: not app.busy)
+    assert app.last_code == 0 and app.download_progress.snapshot()["speed"] == 0
+    assert "总下载速度" not in app.progress_detail.get()
+
+
+def test_progress_queue_is_nonblocking_and_bounded():
+    events = queue.Queue(maxsize=1)
+    events.put(("log", "retain"))
+    session = gui.InstallerSession({}, events)
+    session.send("progress", {"download_bytes": 1})
+    assert events.qsize() == 1 and events.get_nowait() == ("log", "retain")
+
+
+def test_cancel_ignores_queued_late_download_progress(window, monkeypatch, tmp_path):
+    entered, release = threading.Event(), threading.Event()
+    def flow(project, **kwargs):
+        entered.set()
+        assert release.wait(3)
+        return 130
+    monkeypatch.setattr(gui, "run_interactive", flow)
+    app = gui.DependencyManagerWindow(window, tmp_path / "late-progress")
+    app.start()
+    assert entered.wait(2)
+    app.cancel()
+    app.session.events.put_nowait(("progress", {"component": "Git", "download_bytes": 1000, "total_bytes": 2000}))
+    window.update()
+    pump(window, lambda: app.session.events.empty())
+    assert app.download_progress.snapshot()["components"] == {}
+    release.set()
+    pump(window, lambda: not app.busy)
+    assert app.last_code == 130 and app.download_progress.snapshot()["speed"] == 0

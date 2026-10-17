@@ -8,9 +8,12 @@ import re
 import shutil
 import stat
 import tempfile
+import threading
+import time
 import zipfile
 from pathlib import Path, PurePosixPath
 
+from .parallel_work import bounded_map
 from .runtime_paths import contained_runtime_path, unlinked_local_path
 
 MARKER = ".coating-python.json"
@@ -55,7 +58,8 @@ def inspect_owned(directory, manifest, cancel_event=None):
             or data.get("package_sha256") != artifact["sha256"]
             or not isinstance(files, dict) or inventory_digest(files) != artifact["inventory_sha256"]):
         raise ValueError("Private Python ownership/inventory differs from the pinned package; preserved")
-    for name, record in files.items():
+    def verify_file(item):
+        name, record = item
         if cancel_event is not None and cancel_event.is_set():
             raise InterruptedError("Private Python verification cancelled")
         _safe_name(name)
@@ -64,6 +68,8 @@ def inspect_owned(directory, manifest, cancel_event=None):
                 or path.stat().st_size != record["size"]
                 or hashlib.sha256(path.read_bytes()).hexdigest() != record["sha256"]):
             raise ValueError("Private Python file changed; preserved: " + name)
+    for _ in bounded_map(verify_file, files.items(), cancel_event or threading.Event()):
+        pass
     # Ignore caches only: -I makes user/site configuration ineffective, -B is
     # used for installer probes and base-Python venv creation.
     for path in directory.rglob("*"):
@@ -76,11 +82,16 @@ def inspect_owned(directory, manifest, cancel_event=None):
     return data
 
 
-def extract_package(archive, staging, manifest, cancel_event):
+def extract_package(archive, staging, manifest, cancel_event, *, workers=4, emit=None):
     """Preflight every ZIP member; extract only tools/, never execute packaging metadata."""
+    emit = emit or (lambda event: None)
+    started = time.perf_counter()
     artifact = manifest["artifacts"]["x86_64"]
     if hashlib.sha256(Path(archive).read_bytes()).hexdigest() != artifact["sha256"]:
         raise ValueError("Private Python archive SHA-256 mismatch")
+    emit({"event": "timing", "phase": "runtime_hash", "seconds": time.perf_counter() - started,
+          "text": f"runtime_hash: {time.perf_counter() - started:.2f}s"})
+    started = time.perf_counter()
     staging = Path(staging)
     files, names, expanded = {}, set(), 0
     with zipfile.ZipFile(archive) as package:
@@ -102,16 +113,26 @@ def extract_package(archive, staging, manifest, cancel_event):
             expanded += entry.file_size
             if expanded > MAX_EXPANDED:
                 raise ValueError("Runtime archive exceeds expanded size bound")
-        for entry in entries:
+        emit({"event": "timing", "phase": "runtime_archive_preflight", "seconds": time.perf_counter() - started,
+              "text": f"runtime_archive_preflight: {time.perf_counter() - started:.2f}s"})
+        started = time.perf_counter()
+        # Establish validated directory structure before independent file workers.
+        parents = {staging.joinpath(*PurePosixPath(e.filename[len("tools/"):]).parts).parent
+                   for e in entries if e.filename.startswith("tools/") and not e.is_dir()}
+        for parent in sorted(parents, key=lambda value: len(value.parts)):
+            if parent != staging and not contained_runtime_path(parent, staging):
+                raise ValueError("Runtime directory escaped staging")
+            parent.mkdir(parents=True, exist_ok=True)
+        def extract_member(entry):
             if cancel_event.is_set():
                 raise InterruptedError("Private Python extraction cancelled")
             if not entry.filename.startswith("tools/") or entry.is_dir():
-                continue
+                return None
             relative = entry.filename[len("tools/"):]
             _safe_name(relative)
             path = staging.joinpath(*PurePosixPath(relative).parts)
             if not contained_runtime_path(path, staging):
-                raise ValueError("Runtime extraction escaped staging")
+                raise ValueError("Runtime extraction escaped staging: " + str(path) + " -> " + str(path.resolve()))
             path.parent.mkdir(parents=True, exist_ok=True)
             digest, size = hashlib.sha256(), 0
             with package.open(entry) as source, path.open("xb") as out:
@@ -125,7 +146,14 @@ def extract_package(archive, staging, manifest, cancel_event):
                     out.write(chunk)
             if size != entry.file_size:
                 raise ValueError("Truncated runtime archive member")
-            files[relative] = {"size": size, "sha256": digest.hexdigest()}
+            return relative, {"size": size, "sha256": digest.hexdigest()}
+        for result in bounded_map(extract_member, entries, cancel_event, workers=workers):
+            if result is not None:
+                relative, record = result
+                files[relative] = record
+        emit({"event": "timing", "phase": "runtime_extract_verify", "seconds": time.perf_counter() - started,
+              "workers": workers, "files": len(files),
+              "text": f"runtime_extract_verify: {time.perf_counter() - started:.2f}s; {len(files)} files, up to {workers} workers"})
     if inventory_digest(files) != artifact["inventory_sha256"]:
         raise ValueError("Runtime inventory does not match the reviewed official package")
     for name in ("python.exe", "python312.dll", "Lib/venv/__init__.py",
@@ -156,9 +184,12 @@ def deploy(plan, manifest, download, probe, emit, cancel_event, verify_destinati
         archive, staging = temporary / "python.nupkg", temporary / "python"
         staging.mkdir()
         emit({"event": "phase", "phase": "runtime_download"})
+        started = time.perf_counter()
         download(plan["artifact"], archive, cancel_event, emit)
+        emit({"event": "timing", "phase": "runtime_download", "seconds": time.perf_counter() - started,
+              "text": f"runtime_download: {time.perf_counter() - started:.2f}s"})
         emit({"event": "phase", "phase": "runtime_extract"})
-        extract_package(archive, staging, manifest, cancel_event)
+        extract_package(archive, staging, manifest, cancel_event, emit=emit)
         if cancel_event.is_set():
             raise InterruptedError("Private Python deployment cancelled")
         # Executing the verified interpreter is an after-download verification,

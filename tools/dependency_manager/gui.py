@@ -8,11 +8,13 @@ import queue
 import sys
 import tempfile
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .app_info import VERSION, icon_path
+from .download_progress import DownloadProgress, byte_text
 from .interactive import project_directory, run_interactive
 from .mirrors import ProxyConfig, redact, resolve_mirror
 from .python_setup import prepare_python
@@ -65,6 +67,12 @@ class InstallerSession:
         self.pending: Confirmation | None = None
 
     def send(self, kind, value):
+        if kind == "progress":
+            try:
+                self.events.put_nowait((kind, value))
+            except queue.Full:
+                pass
+            return
         while not self.cancel_event.is_set() or kind == "done":
             try:
                 self.events.put((kind, value), timeout=0.1)
@@ -154,6 +162,12 @@ class DependencyManagerWindow:
         self.current_phase = "等待开始"
         self.current_plan = ""
         self.log_file = None
+        self.progress_detail = tk.StringVar(value="")
+        self.download_progress = DownloadProgress()
+        self.operation_started = None
+        self.operation_finished = None
+        self.completed_phases = set()
+        self.active_phase = None
         self._build()
         window.after(50, self._drain)
 
@@ -247,6 +261,12 @@ class DependencyManagerWindow:
         log_label.grid(row=2, column=0, sticky="ew", pady=4)
         self.log_button = ttk.Button(progress, text="打开日志", command=self.open_log, state="disabled")
         self.log_button.grid(row=2, column=1, padx=(8, 0))
+        self.progress_label = ttk.Label(progress, textvariable=self.progress_detail, wraplength=640)
+        self.progress_label.grid(row=3, column=0, columnspan=2, sticky="ew", pady=5)
+        log_actions = ttk.Frame(progress)
+        log_actions.grid(row=4, column=0, columnspan=2, sticky="w")
+        ttk.Button(log_actions, text="复制日志", command=self.copy_log).pack(side="left", padx=(0, 8))
+        ttk.Button(log_actions, text="另存日志…", command=self.save_log).pack(side="left")
         progress.grid_remove()
         self.status.set("默认启用全部镜像加速，点击安装即可开始。")
         status = ttk.Label(outer, textvariable=self.status, wraplength=660)
@@ -254,7 +274,7 @@ class DependencyManagerWindow:
 
         def fit_body(event):
             canvas.itemconfigure(item, width=event.width)
-            for label in (hint, log_label):
+            for label in (hint, log_label, self.progress_label):
                 label.configure(wraplength=max(150, event.width - 40))
             status.configure(wraplength=max(150, event.width - 24))
 
@@ -271,10 +291,15 @@ class DependencyManagerWindow:
         self._resize()
 
     def _resize(self):
-        height = 250 + (340 if self.details_expanded else 0) + (250 if self.progress_frame.winfo_manager() else 0)
+        height = 250 + (340 if self.details_expanded else 0) + (330 if self.progress_frame.winfo_manager() else 0)
         self.window.geometry(f"{max(720, self.window.winfo_width())}x{min(height, self.window.winfo_screenheight() - 100)}")
 
     def _show_progress(self):
+        self.operation_started = time.monotonic()
+        self.operation_finished = None
+        self.completed_phases = set()
+        self.active_phase = None
+        self.download_progress = DownloadProgress()
         self.progress_frame.grid()
         self.progress_bar.start(12)
         self._resize()
@@ -291,8 +316,9 @@ class DependencyManagerWindow:
         self.log.insert("end", message)
         # Keep the live widget bounded; final recovery diagnostics are saved in
         # full even when their displayed excerpt is shorter.
-        if int(self.log.index("end-1c").split(".")[0]) > 1800:
-            self.log.delete("1.0", "400.0")
+        lines = int(self.log.index("end-1c").split(".")[0])
+        if lines > 1800:
+            self.log.delete("1.0", f"{lines - 1400}.0")
         self.log.see("end")
         self.log.configure(state="disabled")
         if self.log_file:
@@ -361,7 +387,8 @@ class DependencyManagerWindow:
                     code = run_interactive(root, output=output, prompt_fn=session.prompt,
                                            phase_fn=lambda value: session.send("phase", value),
                                            plan_fn=review, cancel_event=session.cancel_event, mirror=chosen_mirror,
-                                           backend=None if selected_backend == "auto" else selected_backend)
+                                           backend=None if selected_backend == "auto" else selected_backend,
+                                           pipeline=True, event_fn=lambda value: session.send("progress", value))
             except (KeyboardInterrupt, EOFError):
                 code = 130
             except Exception as exc:
@@ -417,16 +444,27 @@ class DependencyManagerWindow:
     def _drain(self):
         session = self.session
         if session is not None:
+            log_batch = []
             for _unused in range(100):
                 try:
                     kind, value = session.events.get_nowait()
                 except queue.Empty:
                     break
                 if kind == "log":
-                    self._append(value)
+                    log_batch.append(str(value)[:32000])
+                    continue
+                if log_batch:
+                    self._append("\n".join(log_batch), complete=True)
+                    log_batch.clear()
+                if kind == "progress":
+                    if self.last_code is None and not session.cancel_event.is_set():
+                        self.download_progress.observe(value)
                 elif kind == "plan":
                     self.current_plan = value
                 elif kind == "phase" and not session.cancel_event.is_set():
+                    if self.active_phase is not None:
+                        self.completed_phases.add(self.active_phase)
+                    self.active_phase = value
                     self.current_phase = PHASES.get(value, value)
                     self.status.set(self.current_phase)
                     self._append("阶段：" + self.current_phase)
@@ -438,8 +476,15 @@ class DependencyManagerWindow:
                     if value["details"]:
                         self._append(value["details"], complete=True)
                     self.last_code = value["code"]
+                    self.operation_finished = time.monotonic()
+                    self.download_progress.finish()
+                    if self.last_code == 0 and self.active_phase is not None:
+                        self.completed_phases.add(self.active_phase)
                     self.status.set(value.get("summary") or {0: "操作完成。详见日志中的目标环境与后端核验结果。", 130: "已取消；已写入文件保留，请查看日志后重试。"}.get(self.last_code, "安装失败（" + self.current_phase + "）；请查看日志中的原因。"))
                     self._append(self.status.get())
+            if log_batch:
+                self._append("\n".join(log_batch), complete=True)
+        self._update_progress()
         if self.worker is not None and self.last_code is not None and not self.worker.is_alive():
             self.worker.join(timeout=0)
             self.worker = None
@@ -454,6 +499,44 @@ class DependencyManagerWindow:
                 self.window.destroy()
                 return
         self.window.after(50, self._drain)
+
+    def _update_progress(self):
+        if self.operation_started is None:
+            return
+        elapsed = int((self.operation_finished or time.monotonic()) - self.operation_started)
+        snapshot = self.download_progress.snapshot()
+        pieces = [f"已用 {elapsed // 60:02d}:{elapsed % 60:02d}",
+                  f"已完成阶段 {len(self.completed_phases)}/{len(PHASES)}"]
+        if any(row["active"] for row in snapshot["components"].values()):
+            pieces.append("总下载速度 " + byte_text(snapshot["speed"]) + "/s")
+        transfers = []
+        for component, row in snapshot["components"].items():
+            total = byte_text(row["total"]) if row["total"] is not None else "总量未知"
+            text = f"{component}: {byte_text(row['bytes'])} / {total}"
+            if row["active"]:
+                text += " · " + byte_text(row["speed"]) + "/s"
+                if row["eta"] is not None:
+                    text += f" · 约剩 {int(row['eta'])} 秒"
+            else:
+                text += " · 传输已结束"
+            transfers.append(text)
+        text = " · ".join(pieces) + ("\n" + "；".join(transfers) if transfers else "")
+        if text != self.progress_detail.get():
+            self.progress_detail.set(text)
+
+    def copy_log(self):
+        self.window.clipboard_clear()
+        self.window.clipboard_append(self.log.get("1.0", "end-1c"))
+
+    def save_log(self):
+        selected = filedialog.asksaveasfilename(parent=self.window, defaultextension=".log",
+            initialfile="coating-install.log", filetypes=(("日志", "*.log"), ("所有文件", "*.*")))
+        if selected:
+            try:
+                text = Path(self.log_file).read_text(encoding="utf-8") if self.log_file else self.log.get("1.0", "end-1c")
+                Path(selected).write_text(text, encoding="utf-8")
+            except OSError as exc:
+                self.status.set("保存日志失败：" + redact(str(exc)))
 
     def check_updates(self):
         if self.busy or self.closing:
@@ -526,6 +609,7 @@ class DependencyManagerWindow:
     def cancel(self):
         if self.session is not None:
             self.session.cancel()
+            self.download_progress.finish()
             if self.confirmation is not None:
                 self.confirmation.destroy()
                 self.confirmation = None

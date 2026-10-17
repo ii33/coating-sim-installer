@@ -193,6 +193,10 @@ def _download_git_once(artifact, destination, proxy, cancel_event, emit, *, max_
             timeout=10,
         ) as response:
             _official_url(response.geturl())
+            length = getattr(response, "headers", {}).get("Content-Length")
+            length = int(length) if length is not None else None
+            if length is not None and not 0 <= length <= max_bytes:
+                raise ValueError("Git download exceeds size bound")
             with open(destination, "xb") as output:
                 created = True
                 while True:
@@ -208,9 +212,15 @@ def _download_git_once(artifact, destination, proxy, cancel_event, emit, *, max_
                         raise ValueError("Git download exceeds size bound")
                     digest.update(chunk)
                     output.write(chunk)
-                    emit({"event": "progress", "phase": "git_download", "download_bytes": total})
+                    emit({"event": "progress", "phase": "git_download", "source": artifact["url"],
+                          "download_bytes": total, "total_bytes": length})
+        if length is not None and total != length:
+            raise ValueError("Git download was truncated")
         if digest.hexdigest() != artifact["sha256"]:
             raise ValueError("Git SHA-256 mismatch; archive will not be used")
+        emit({"event": "log", "phase": "git_download", "source": artifact["url"],
+              "download_bytes": total, "total_bytes": length, "transfer_finished": True,
+              "text": f"Git download verified: {total} bytes; pinned SHA-256 matched."})
     except Exception:
         if created:
             Path(destination).unlink(missing_ok=True)
@@ -353,8 +363,14 @@ def execute_git_runtime(plan, confirmed=False, emit=None, cancel_event=None, pro
             stage = Path(temporary)
             archive, unpacked = stage / "git.zip", stage / "unpacked"
             unpacked.mkdir()
+            started = time.perf_counter()
             download_git(plan["artifact"], archive, proxy, cancel_event, emit)
+            emit({"event": "timing", "phase": "git_download", "seconds": time.perf_counter() - started,
+                  "text": f"git_download: {time.perf_counter() - started:.2f}s"})
+            started = time.perf_counter()
             _extract_zip(archive, unpacked, cancel_event)
+            emit({"event": "timing", "phase": "git_extract", "seconds": time.perf_counter() - started,
+                  "text": f"git_extract: {time.perf_counter() - started:.2f}s"})
             if not (unpacked / "cmd/git.exe").is_file():
                 raise ValueError("Git archive is missing cmd/git.exe")
             (unpacked / MARKER).write_text(
