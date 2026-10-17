@@ -701,3 +701,25 @@ def test_queued_success_cannot_override_a_cancel_request(window, tmp_path):
     app._drain()
     assert app.last_code == 130 and app.terminal_state == "cancelled"
     assert "已取消" in app.result_title.get() and "安装成功" not in app.status.get()
+
+
+def test_auto_ui_request_route_and_completion_are_consistent(window, monkeypatch, tmp_path):
+    observed = {}
+    def install(project, **kwargs):
+        observed.update(kwargs)
+        kwargs["plan_fn"]({"operation": "compute_route", "summary": "auto → cpu; CUDA unavailable"})
+        kwargs["event_fn"]({"event": "completion", "operation": "install", "target": str(project),
+            "shortcut": {"status": "success"}, "compute_route": {
+                "requested_backend": "auto", "planned_backend": "cpu", "usable_backend": "cpu",
+                "reason": "CUDA unavailable; base verified"}})
+        return 0
+    monkeypatch.setattr(gui, "run_interactive", install)
+    app=gui.DependencyManagerWindow(window,tmp_path/"isolated")
+    assert app.backend.get()=="auto"
+    app.start()
+    pump(window,lambda:not app.busy)
+    assert observed["backend"] is None
+    assert "auto" in app.backend_hint.get() and "cpu" in app.backend_hint.get()
+    assert "auto" in app.result_detail.get() and "cpu" in app.result_detail.get()
+    assert "CUDA unavailable" in app.result_detail.get()
+    assert app.terminal_state=="success"

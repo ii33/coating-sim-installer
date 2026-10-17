@@ -152,6 +152,7 @@ class DependencyManagerWindow:
         self.mirror.trace_add("write", lambda *unused: setattr(self, "mirror_changed", True))
         self.development = tk.BooleanVar(value=False)
         self.backend = tk.StringVar(value="auto")
+        self.backend_hint = tk.StringVar(value="auto：CPU 基础安装；按证据启用可选 GPU")
         self.details_expanded = False
         self.update_channel = tk.StringVar(value="preview")
         self.update_page = None
@@ -238,7 +239,7 @@ class DependencyManagerWindow:
         self.backend_control = ttk.Combobox(device, textvariable=self.backend,
             values=("auto", "cpu", "directml", "cuda12", "cuda13"), state="readonly", width=12)
         self.backend_control.pack(side="left")
-        ttk.Label(device, text="auto 自动检测；不可用设备会明确报告").pack(side="left", padx=8)
+        ttk.Label(device, textvariable=self.backend_hint, wraplength=410).pack(side="left", padx=8)
         self.controls.append(self.backend_control)
         hint = self.runtime_notice_label = ttk.Label(details,
             text="安装将自动准备 Python、Git、源码、依赖和启动入口。已有文件不会被覆盖。\n" + managed_runtime_notice(),
@@ -359,6 +360,12 @@ class DependencyManagerWindow:
         if view["detail"]:
             details.append(redact(view["detail"])[:700])
         details.append("目标路径：" + str(completion.get("target") or self.current_target))
+        compute = completion.get("compute_route") or {}
+        if compute:
+            details.append("设备选择：" + compute.get("requested_backend", "auto") +
+                           "；实际计划：" + compute.get("planned_backend", "cpu") +
+                           "；已验证可用：" + compute.get("usable_backend", "未确认"))
+            details.append(compute.get("reason", ""))
         if view["state"] == "success" and needs_shortcut:
             shortcut = completion["shortcut"]
             state = "已存在并验证" if shortcut.get("reused") else "已创建"
@@ -478,6 +485,8 @@ class DependencyManagerWindow:
                 errors = plan.get("errors") if isinstance(plan, dict) else None
                 if errors:
                     failure_reason = "; ".join(map(str, errors)) if isinstance(errors, (list, tuple)) else str(errors)
+                if isinstance(plan, dict) and plan.get("operation") == "compute_route":
+                    session.send("compute-route", redact(plan.get("summary", ""), ProxyConfig("env")))
                 session.send("plan", redact(json.dumps(plan, ensure_ascii=False, indent=2), ProxyConfig("env")))
             try:
                 with (nullcontext() if operation == "project-update" else project_operation(root)):
@@ -578,6 +587,8 @@ class DependencyManagerWindow:
                 if kind == "progress":
                     if self.last_code is None and not session.cancel_event.is_set():
                         self.download_progress.observe(value)
+                elif kind == "compute-route":
+                    self.backend_hint.set(value)
                 elif kind == "plan":
                     self.current_plan = value
                 elif kind == "phase" and not session.cancel_event.is_set():

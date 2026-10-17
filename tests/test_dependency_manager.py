@@ -332,7 +332,7 @@ class ManagerTests(unittest.TestCase):
     def test_directml_new_target_reports_selected_creation_python(self):
         for version, platform_name, status in (("3.13.16", "win32", "blocked"), ("3.12.10", "linux", "blocked"), ("3.12.10", "win32", "ready")):
             with self.subTest(version=version, platform=platform_name):
-                data = {"python": version, "platform": platform_name, "machine": "AMD64", "executable": "chosen-python", "prefix": "base", "base_prefix": "base", "has_venv": True, "has_ensurepip": True, "bundled_pip": "25.0"}
+                data = {"python": version, "platform": platform_name, "machine": "AMD64", "implementation": "CPython", "executable": "chosen-python", "prefix": "base", "base_prefix": "base", "has_venv": True, "has_ensurepip": True, "bundled_pip": "25.0"}
                 with patch.object(manager, "probe_python", return_value=data):
                     plan = manager.plan_environment(self.root, backend="directml", python="chosen-python", proxy=self.proxy)
                 self.assertEqual(plan["status"], status)

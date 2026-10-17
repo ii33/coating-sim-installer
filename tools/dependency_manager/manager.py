@@ -581,6 +581,7 @@ def plan_environment(
                         "python",
                         "platform",
                         "machine",
+                        "implementation",
                     )
                 }
                 result["actions"].append(
@@ -619,7 +620,7 @@ def plan_environment(
         identity = target if target["exists"] else result.get("bootstrap_identity", {})
         allowed, reason = candidates(_visible_gpus(sys.platform)[0], identity)
         if identity.get("platform") != sys.platform or backend not in allowed:
-            result["errors"].append("Requested " + backend + " is not a reviewed hardware/driver combination: " + reason)
+            result["errors"].append("Requested " + backend + " is not a reviewed hardware/driver combination: " + reason + "; select auto or cpu for the base installation, or choose a supported CUDA profile")
     selected = [
         row["requirement"]
         for row in result["packages"]

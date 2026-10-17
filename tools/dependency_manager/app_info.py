@@ -3,7 +3,7 @@ import os
 import sys
 from pathlib import Path
 
-VERSION = "0.1.0-alpha.7"
+VERSION = "0.1.0-alpha.8"
 INSTALLER_REPOSITORY = "ii33/coating-sim-installer"
 
 

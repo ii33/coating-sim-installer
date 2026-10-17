@@ -49,6 +49,9 @@ def run_interactive(
     project=None, *, input_fn=input, output=print, cancel_event=None,
     prompt_fn=None, phase_fn=None, plan_fn=None, mirror=None, backend=None, pipeline=False, event_fn=None,
 ):
+    backend = None if backend == "auto" else backend
+    requested_backend = backend or "auto"
+    compute_route = {}
     cancel = cancel_event or threading.Event()
     proxy = ProxyConfig("env")
     pipeline_pool = None
@@ -262,7 +265,23 @@ def run_interactive(
         if cancel.is_set() or recommendation.get("status") == "cancelled":
             raise KeyboardInterrupt
         show(recommendation)
-        backend = recommendation.get("selected_backend", "cpu")
+        candidate = recommendation.get("selected_backend", "cpu")
+        optional_cuda = candidate if requested_backend == "auto" and candidate in ("cuda12", "cuda13") else None
+        backend = "cpu" if optional_cuda else candidate
+
+        def route(selected, reason):
+            if optional_cuda and selected == "cpu" and reason.startswith("可选 CUDA"):
+                compute_route["fallback_reason"] = reason
+            if compute_route.get("fallback_reason") and compute_route["fallback_reason"] not in reason:
+                reason += "；" + compute_route["fallback_reason"]
+            compute_route.update(requested_backend=requested_backend, candidate_backend=candidate,
+                                 planned_backend=selected, reason=reason)
+            summary = f"计算设备：{requested_backend} → {selected}；{reason}"
+            show(dict(compute_route, operation="compute_route", summary=summary))
+            say(summary)
+
+        route(backend, ("先完成 CPU/受支持 DirectML 基础安装，再检查可选 " + optional_cuda)
+              if optional_cuda else recommendation.get("reason", "按用户选择生成计划"))
         if sys.platform != "win32":
             say("DirectML 已跳过：本平台不支持 Windows 默认 DirectML 配置。")
         if existing:
@@ -331,6 +350,40 @@ def run_interactive(
         )
         if not success(result):
             return 130 if cancel.is_set() or result.get("status") == "cancelled" else 2
+        if optional_cuda:
+            # The confirmed base transaction completes first. CUDA is optional in
+            # auto mode; a late device/driver/wheel failure must not undo that base.
+            phase("dependencies")
+            extra = plan_environment(app, app / ".venv", END_USER_GROUPS, optional_cuda,
+                                     mirror, "install", python, proxy, profile)
+            show(extra)
+            if cancel.is_set():
+                raise KeyboardInterrupt
+            if extra.get("status") == "ready":
+                route(optional_cuda, "基础安装完成；执行已重新校验的可选 CUDA 计划")
+                optional_result = operation(execute_plan, extra, confirmed=True, emit=emit,
+                                            cancel_event=cancel, proxy=proxy)
+                if cancel.is_set() or optional_result.get("status") == "cancelled":
+                    raise KeyboardInterrupt
+                if success(optional_result):
+                    backend, result = optional_cuda, optional_result
+                else:
+                    # Pip may have changed dependencies before failing. CPU fallback
+                    # is only a success after the real target's full base rows pass.
+                    base = inspect_environment(app, app / ".venv", END_USER_GROUPS, "cpu", profile)
+                    rows = base.get("packages") or []
+                    if (base.get("errors") or not base.get("target", {}).get("valid")
+                            or not rows or any(row.get("status") != "satisfied" for row in rows)):
+                        show(base)
+                        say("安装失败：可选 CUDA 未完成，基础依赖复核也未通过；保留现场，请检查日志后重试。")
+                        return 2
+                    route("cpu", "可选 CUDA 安装未完成；基础依赖已重新验证，继续使用 CPU："
+                          + "; ".join(optional_result.get("errors", [])))
+                    # The earlier base validation is stale after a failed pip writer.
+                    result = {}
+            else:
+                route("cpu", "可选 CUDA 计划不可用；保留已完成的 CPU 基础安装："
+                      + "; ".join(extra.get("errors", [])))
         phase("verify")
         inspected = inspect_environment(app, app / ".venv", END_USER_GROUPS, backend, profile)
         actual = inspected.get("target") or {}
@@ -341,6 +394,18 @@ def run_interactive(
                 raise KeyboardInterrupt
             show(verified)
             say("验证后建议计算后端：" + str(verified.get("recommended_backend", "cpu")))
+            usable_backend = verified.get("recommended_backend", "cpu")
+            if usable_backend not in ("cpu", "directml", "cuda12", "cuda13"):
+                usable_backend = "cpu"
+            if usable_backend != "cpu" and verified.get("backend_usable", {}).get(usable_backend) is not True:
+                usable_backend = "cpu"
+            compute_route["usable_backend"] = usable_backend
+            route(backend, "已验证可用后端：" + usable_backend +
+                  ("；可选 CUDA 未通过，保留 CPU/已验证 DirectML" if optional_cuda and usable_backend not in ("cuda12", "cuda13") else ""))
+            if (requested_backend in ("cuda12", "cuda13")
+                    and verified.get("backend_usable", {}).get(requested_backend) is not True):
+                say("安装失败：手选 " + requested_backend + " 的数值验证未通过；依赖已保留。请选择 auto 或 cpu 后重试，未宣称 GPU 可用。")
+                return 2
             for probe_backend, diagnostic in verified.get("probe_diagnostics", {}).items():
                 say(probe_backend + " isolated probe: " + json.dumps(diagnostic, ensure_ascii=False))
             if backend != "cpu":
@@ -356,6 +421,9 @@ def run_interactive(
         else:
             show(inspected)
             say("依赖事务已完成，但目标解释器身份未验证；不宣称 GPU 可用。")
+            if requested_backend in ("cuda12", "cuda13"):
+                say("安装失败：手选 CUDA 的目标 Python 身份无法确认；请选择 auto 或 cpu 后重试。")
+                return 2
         phase("launch")
         launch_plan = plan_launch_entries(app, name="launch-coating")
         if cancel.is_set():
@@ -392,6 +460,7 @@ def run_interactive(
         say(f"安装完成：{app}；可使用 {app / '.venv'} 中的 Python 启动 launcher.py。")
         if event_fn is not None:
             event_fn({"event": "completion", "operation": "install", "target": str(app),
+                      "compute_route": dict(compute_route),
                       "shortcut": desktop_result if sys.platform == "win32" else {"status": "success", "skipped": True}})
         return 0
     except (KeyboardInterrupt, EOFError):

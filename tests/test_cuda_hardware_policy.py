@@ -265,3 +265,52 @@ def test_newer_existing_312_patch_is_preferred_over_managed_31210(monkeypatch, t
     monkeypatch.setattr(python_discovery, "probe_python", probe)
     assert python_discovery.discover_python("directml", preferred_minor="3.12")["selected_python"] == paths[1]
     assert python_discovery.discover_python("directml", explicit=paths[0], preferred_minor="3.12")["selected_python"] == paths[0]
+
+
+def test_fresh_cuda_plan_preserves_cpython_identity(monkeypatch, tmp_path):
+    monkeypatch.setattr(manager.sys, "platform", "win32")
+    (tmp_path / "requirements.txt").write_text("numpy\n")
+    observed = dict(identity(), prefix="base", base_prefix="base", has_venv=True,
+                    has_ensurepip=True, bundled_pip="25.0")
+    monkeypatch.setattr(manager, "probe_python", lambda *a, **k: observed)
+    monkeypatch.setattr(cr, "_visible_gpus", lambda *a: ([gpu()], []))
+    plan = manager.plan_environment(tmp_path, backend="cuda13", python="private-python")
+    assert plan["status"] == "ready", plan["errors"]
+    assert plan["bootstrap_identity"]["implementation"] == "CPython"
+
+
+@pytest.mark.parametrize("devices,target,expected", [
+    ([], identity(), "cpu"),
+    ([{"source": "windows_cim", "name": "Generic CPU display"}], identity(), "cpu"),
+    ([gpu(driver="N/A")], identity(), "cpu"),
+    ([gpu()], identity(machine="ARM64"), "cpu"),
+    ([gpu()], identity(), "cuda13"),
+    ([gpu(driver="537.42")], identity(), "cuda12"),
+])
+def test_auto_device_matrix_flows_into_real_fresh_plan(monkeypatch, tmp_path, devices, target, expected):
+    monkeypatch.setattr(manager.sys, "platform", "win32")
+    monkeypatch.setattr(cr, "_visible_gpus", lambda *a: (devices, []))
+    monkeypatch.setattr(cr, "_runtime_probe", lambda *a: {"available": False})
+    monkeypatch.setattr(cr, "wheel_evidence", lambda *a: {"available": True, "reason": "reviewed fixture"})
+    recommendation = cr.recommend_environment(target)
+    assert recommendation["selected_backend"] == expected
+    assert not any(recommendation["backend_usable"].values())
+    (tmp_path / "requirements.txt").write_text("numpy\n")
+    observed = dict(target, prefix="base", base_prefix="base", has_venv=True,
+                    has_ensurepip=True, bundled_pip="25.0")
+    monkeypatch.setattr(manager, "probe_python", lambda *a, **k: observed)
+    plan = manager.plan_environment(tmp_path, backend=expected, python="private-python")
+    if target["machine"] == "ARM64":
+        assert plan["status"] == "blocked"
+        assert any("DirectML requires" in error for error in plan["errors"])
+        assert not any("Requested cuda" in error for error in plan["errors"])
+        return
+    assert plan["status"] == "ready", plan["errors"]
+    assert plan["backend"] == expected
+
+
+def test_device_probe_unavailable_keeps_cpu_and_no_cuda_wheel_query(monkeypatch):
+    monkeypatch.setattr(cr, "_run", lambda *a, **k: None)
+    monkeypatch.setattr(cr, "_runtime_probe", lambda *a: {"available": False, "reason": "probe unavailable"})
+    monkeypatch.setattr(cr, "wheel_evidence", lambda *a: pytest.fail("unverified GPU must not query CUDA wheels"))
+    assert cr.recommend_environment(identity())["selected_backend"] == "cpu"

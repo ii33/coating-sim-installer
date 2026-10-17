@@ -72,3 +72,12 @@ Implementation: `tools/dependency_manager/{cuda_policy,compute_recommendation,
 manager,python_discovery,python_setup,runtime,interactive}.py` and
 `runtime_manifest.json`. Tests: `tests/test_cuda_hardware_policy.py` plus existing
 manager/discovery/transaction regression suites.
+
+
+## alpha.8 自动安装与明确选择
+
+自动选择会显示请求模式、候选后端、实际计划和验证后可用后端。先完成 CPU 与受支持的 Windows DirectML 基础依赖；兼容的可选 CUDA 使用第二份独立计划，重新核对目标 CPython 身份、设备和驱动。新建环境的身份传递保留 implementation，避免将有效 CPython 误报为不支持的目标。
+
+无 NVIDIA、设备探测失败、驱动未知或可选 CUDA 计划不可用时保留 CPU 基础安装。若可选 pip 安装失败，只有基础依赖的真实目标复核完整通过才能继续报告 CPU 安装成功；否则明确失败并保留现场。取消始终为取消。手选 CUDA 继续严格校验，并在设备、身份或数值验证失败时提示改选 auto/cpu；不把软件包安装成功当作 GPU 可用。
+
+Windows ARM 和不支持的 Python/DirectML 组合仍会在运行时或依赖计划边界准确阻断；自动模式不会绕过平台支持限制。开发依赖 profile 与设备选择独立。保存的镜像/源码记录不会把界面 auto 改成 CUDA 请求。

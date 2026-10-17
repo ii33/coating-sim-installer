@@ -483,3 +483,75 @@ def test_install_completion_event_contains_verified_desktop_status(flow):
     assert done["target"] == str(root / "app")
     if subject.sys.platform == "win32":
         assert done["shortcut"]["reused"] is True
+
+
+def test_auto_cuda_base_plan_and_optional_plan_are_distinct(flow):
+    root, calls, _ = flow
+    calls["recommend_environment"].return_value = {"selected_backend": "cuda13"}
+    calls["execute_plan"].return_value = {"status": "success", "compute_validation": {
+        "status": "success", "recommended_backend": "cuda13", "backend_usable": {"cuda13": True}}}
+    reviews, events = [], []
+    answers = iter(["", "", "", "", "y"])
+    assert subject.run_interactive(root, input_fn=lambda _: next(answers), output=lambda _: None,
+        plan_fn=reviews.append, event_fn=events.append) == 0
+    assert calls["plan_project_deployment"].call_args.kwargs["backend"] == "cpu"
+    assert calls["plan_environment"].call_args.args[3] == "cuda13"
+    route = next(v for v in events if v["event"] == "completion")["compute_route"]
+    assert route["requested_backend"] == "auto" and route["planned_backend"] == "cuda13"
+    assert route["usable_backend"] == "cuda13"
+    assert any(v.get("operation") == "compute_route" and "auto" in v["summary"] for v in reviews)
+
+
+def test_auto_late_device_rejection_keeps_base_without_executing_cuda(flow):
+    root, calls, _ = flow
+    calls["recommend_environment"].side_effect = [
+        {"selected_backend": "cuda13"},
+        {"status": "success", "recommended_backend": "cpu", "backend_usable": {"cuda13": False}}]
+    calls["plan_environment"].return_value = {"status": "blocked", "errors": ["driver became unavailable"]}
+    events=[]
+    answers=iter(["", "", "", "", "y"])
+    assert subject.run_interactive(root,input_fn=lambda _:next(answers),output=lambda _:None,event_fn=events.append)==0
+    calls["execute_project_deployment"].assert_called_once()
+    calls["execute_plan"].assert_not_called()
+    route=next(v for v in events if v["event"]=="completion")["compute_route"]
+    assert route["planned_backend"]=="cpu" and route["usable_backend"]=="cpu"
+    assert "driver became unavailable" in route["fallback_reason"]
+
+
+@pytest.mark.parametrize("base_valid,expected", [(True,0),(False,2)])
+def test_auto_cuda_writer_failure_requires_verified_intact_base(flow,base_valid,expected):
+    root,calls,_=flow
+    calls["recommend_environment"].side_effect=[{"selected_backend":"cuda13"},
+        {"status":"success","recommended_backend":"cpu","backend_usable":{"cuda13":False}}]
+    calls["execute_plan"].return_value={"status":"failed","errors":["CUDA resolver unavailable"]}
+    calls["inspect_environment"].return_value={"target":{"valid":True,"executable":"/python"},
+        "errors":[],"packages":[{"name":"numpy","status":"satisfied" if base_valid else "missing"}]}
+    answers=iter(["", "", "", "", "y"])
+    assert subject.run_interactive(root,input_fn=lambda _:next(answers),output=lambda _:None)==expected
+    if not base_valid:
+        calls["execute_launch_entries"].assert_not_called()
+
+
+@pytest.mark.parametrize("identity_valid", [True, False])
+def test_manual_cuda_does_not_fallback_or_claim_failed_gpu_success(flow, identity_valid):
+    root,calls,_=flow
+    calls["recommend_environment"].side_effect=[{"selected_backend":"cuda13"},
+        {"status":"success","recommended_backend":"cpu","backend_usable":{"cuda13":False}}]
+    if not identity_valid:
+        calls["inspect_environment"].return_value={"target":{"valid":False},"errors":["identity unavailable"]}
+    messages=[]
+    answers=iter(["", "", "", "", "y"])
+    assert subject.run_interactive(root,backend="cuda13",input_fn=lambda _:next(answers),output=messages.append)==2
+    assert calls["plan_project_deployment"].call_args.kwargs["backend"]=="cuda13"
+    calls["plan_environment"].assert_not_called()
+    calls["execute_launch_entries"].assert_not_called()
+    assert any("auto" in text and "cpu" in text for text in messages)
+
+
+def test_optional_cuda_cancellation_is_never_cpu_success(flow):
+    root,calls,_=flow
+    calls["recommend_environment"].return_value={"selected_backend":"cuda13"}
+    calls["execute_plan"].return_value={"status":"cancelled"}
+    answers=iter(["", "", "", "", "y"])
+    assert subject.run_interactive(root,input_fn=lambda _:next(answers),output=lambda _:None)==130
+    calls["execute_launch_entries"].assert_not_called()
