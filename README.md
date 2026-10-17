@@ -1,5 +1,7 @@
 # Coating Sim 在线安装器
 
+Windows 托管应用安装包固定为 3.12.10（最后传统官方完整安装包，非最新安全补丁）；优先复用已有较新的完整 Python 3.12。
+
 未发布源码候选：Windows 默认安装 DirectML，应用环境优先 Python 3.12，沉积依赖按硬件选择 CUDA12/13。
 详情及验证边界见 [硬件选择规则](docs/hardware-cuda-selection.md)；已发布 alpha.1 EXE 不包含这些改动。
 

@@ -51,6 +51,14 @@ def runtime_manifest():
     return data
 
 
+def managed_runtime_notice():
+    version = runtime_manifest()["version"]
+    return (
+        f"Windows 托管应用 Python {version} 是 3.12 系列最后传统官方完整安装包，非最新安全补丁。"
+        "优先复用已有较新的完整 Python 3.12；已有环境不会被替换。"
+    )
+
+
 def _architecture(machine):
     machine = machine.lower()
     return {
@@ -130,6 +138,7 @@ def plan_runtime(
         [
             "This is a separate normal CPython for creating project venvs; the bundled tool runtime is never used with -m venv",
             "Windows full installer creates per-user maintenance/uninstall records; no PATH, launcher, associations or shortcuts",
+            managed_runtime_notice(),
             "Application default is CPython 3.12; the installer executable runtime is independent. Existing same-minor registrations are preserved and reused, never overwritten",
             "If prerequisites require administrator access, stop and report the prerequisite; this tool never requests elevation",
         ],

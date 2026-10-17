@@ -373,3 +373,20 @@ def test_cancelled_runtime_keeps_final_recovery_details_with_full_queue(window, 
     saved = Path(app.log_file).read_text(encoding="utf-8")
     assert "retained-installer.log" in saved and "retained-download" in saved
     assert "secret" not in saved and "private" not in saved
+
+
+def test_managed_runtime_patch_status_is_visible_before_install(window, tmp_path):
+    from tools.dependency_manager.runtime import runtime_manifest
+    app = gui.DependencyManagerWindow(window, tmp_path / "uncreated")
+    window.deiconify()
+    window.update()
+    label = app.runtime_notice_label
+    assert label.winfo_viewable()
+    assert label.winfo_rooty() >= window.winfo_rooty()
+    assert label.winfo_rooty() + label.winfo_height() <= window.winfo_rooty() + window.winfo_height()
+    notice = label.cget("text")
+    assert runtime_manifest()["version"] in notice
+    assert "最后传统官方完整安装包" in notice
+    assert "非最新安全补丁" in notice
+    assert "优先复用" in notice
+    assert not app.busy and not (tmp_path / "uncreated").exists()

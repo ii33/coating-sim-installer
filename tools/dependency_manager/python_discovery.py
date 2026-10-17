@@ -122,7 +122,12 @@ def discover_python(backend="cpu", explicit=None, *, project=None, cancel_event=
         return {"status": "cancelled", "selected_python": None, "candidates": candidates, "errors": []}
     compatible = [row for row in candidates if row["compatible"]]
     if preferred_minor and not explicit:
-        compatible.sort(key=lambda row: not str((row.get("identity") or {}).get("python", "")).startswith(preferred_minor + "."))
+        def preference(row):
+            version = str((row.get("identity") or {}).get("python", ""))
+            match = re.match(r"(\d+)\.(\d+)\.(\d+)", version)
+            parts = tuple(map(int, match.groups())) if match else (0, 0, 0)
+            return (not version.startswith(preferred_minor + "."), tuple(-part for part in parts))
+        compatible.sort(key=preference)
     selected = next((row["path"] for row in compatible), None)
     return {"status": "ready" if selected else "missing", "selected_python": selected,
             "candidates": candidates, "errors": [] if selected else ["No compatible creation Python found; explicitly obtain a supported runtime or select its interpreter."]}

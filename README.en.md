@@ -1,5 +1,7 @@
 # Coating Sim Installer
 
+The managed application fallback is Python3.12.10, the last conventional official Windows full installer, not the latest security patch. A newer existing compatible full3.12 interpreter is preferred.
+
 Unreleased source candidate: Windows default DirectML, Python3.12 application
 preparation and hardware-aware CUDA12/13 dependency selection. See the
 [policy, verification boundaries and official sources](docs/hardware-cuda-selection.md).

@@ -16,6 +16,7 @@ from .app_info import VERSION, icon_path
 from .interactive import project_directory, run_interactive
 from .mirrors import ProxyConfig, redact
 from .python_setup import prepare_python
+from .runtime import managed_runtime_notice
 from .runtime_paths import unlinked_local_path
 from .updates import check_installer_updates, check_project_updates, validated_release_page
 
@@ -191,7 +192,8 @@ class DependencyManagerWindow:
             control = ttk.Checkbutton(body, text=label, variable=variable)
             control.grid(row=row, column=0, sticky="w", pady=4)
             self.controls.append(control)
-        hint = ttk.Label(body, text="新安装会先准备源码，再确认依赖计划；已有 app 和虚拟环境会接受检查。代理沿用本次进程环境。", wraplength=680)
+        hint = ttk.Label(body, text="新安装会先准备源码，再确认依赖计划；已有 app 和虚拟环境会接受检查。代理沿用本次进程环境。\n" + managed_runtime_notice(), wraplength=680)
+        self.runtime_notice_label = hint
         hint.grid(row=6, column=0, sticky="ew", pady=(8, 12))
         ttk.Label(body, text="安装日志").grid(row=7, column=0, sticky="w")
         log_frame = ttk.Frame(body)

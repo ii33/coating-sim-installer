@@ -252,3 +252,16 @@ def test_discovery_prefers_312_and_rejects_313_for_default_directml(monkeypatch,
     found = python_discovery.discover_python("directml", preferred_minor="3.12")
     assert found["selected_python"] == paths[1]
     assert not found["candidates"][2]["compatible"]
+
+
+def test_newer_existing_312_patch_is_preferred_over_managed_31210(monkeypatch, tmp_path):
+    paths = [str(tmp_path / "managed.exe"), str(tmp_path / "newer.exe")]
+    for path in paths:
+        Path(path).touch()
+    def probe(path, **kwargs):
+        return dict(identity(python="3.12.10" if path == paths[0] else "3.12.14"),
+                    has_venv=True, has_ensurepip=True, prefix="base", base_prefix="base", bundled_pip="25.0")
+    monkeypatch.setattr(python_discovery, "_candidate_paths", lambda *a: ((p, "path") for p in paths))
+    monkeypatch.setattr(python_discovery, "probe_python", probe)
+    assert python_discovery.discover_python("directml", preferred_minor="3.12")["selected_python"] == paths[1]
+    assert python_discovery.discover_python("directml", explicit=paths[0], preferred_minor="3.12")["selected_python"] == paths[0]
