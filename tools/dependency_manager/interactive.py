@@ -390,6 +390,9 @@ def run_interactive(
         if cancel.is_set():
             raise KeyboardInterrupt
         say(f"安装完成：{app}；可使用 {app / '.venv'} 中的 Python 启动 launcher.py。")
+        if event_fn is not None:
+            event_fn({"event": "completion", "operation": "install", "target": str(app),
+                      "shortcut": desktop_result if sys.platform == "win32" else {"status": "success", "skipped": True}})
         return 0
     except (KeyboardInterrupt, EOFError):
         cancel.set()

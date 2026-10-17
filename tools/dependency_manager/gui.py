@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .app_info import VERSION, icon_path
+from .completion_state import terminal_outcome
 from .download_progress import DownloadProgress, byte_text
 from .interactive import project_directory, run_interactive
 from .mirrors import ProxyConfig, redact, resolve_mirror
@@ -173,6 +174,10 @@ class DependencyManagerWindow:
         self.active_phase = None
         self.total_phases = len(PHASES)
         self.operation_name = ""
+        self.current_target = str(Path(project).absolute())
+        self.terminal_state = "idle"
+        self.result_title = tk.StringVar(value="")
+        self.result_detail = tk.StringVar(value="")
         self._build()
         window.after(50, self._drain)
 
@@ -276,12 +281,31 @@ class DependencyManagerWindow:
         ttk.Button(log_actions, text="另存日志…", command=self.save_log).pack(side="left")
         progress.grid_remove()
         self.status.set("默认启用全部镜像加速，点击安装即可开始。")
+        self.result_panel = tk.Frame(outer, background="#EAF7EE", padx=14, pady=12)
+        self.result_panel.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        self.result_heading = tk.Label(self.result_panel, textvariable=self.result_title,
+            font=("Microsoft YaHei UI", 19, "bold"), anchor="w", justify="left")
+        self.result_heading.pack(fill="x")
+        self.result_body = tk.Label(self.result_panel, textvariable=self.result_detail,
+            font=("Microsoft YaHei UI", 10), anchor="w", justify="left", wraplength=640)
+        self.result_body.pack(fill="x", pady=(7, 0))
+        self.result_actions = ttk.Frame(outer, padding=(0, 10, 0, 0))
+        self.result_actions.grid(row=2, column=0, columnspan=2, sticky="ew")
+        self.result_actions.columnconfigure(1, weight=1)
+        self.retry_button = ttk.Button(self.result_actions, text="重试", command=self.retry)
+        self.retry_button.grid(row=0, column=0, sticky="w")
+        self.exit_button = tk.Button(self.result_actions, text="退出安装器", command=self.close,
+            font=("Microsoft YaHei UI", 14, "bold"), foreground="white", background="#1D4ED8",
+            activeforeground="white", activebackground="#1E40AF", relief="flat", padx=24, pady=9)
+        self.exit_button.grid(row=0, column=2, sticky="e")
+        self.result_panel.grid_remove()
+        self.result_actions.grid_remove()
         status = ttk.Label(outer, textvariable=self.status, wraplength=660)
-        status.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        status.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
         def fit_body(event):
             canvas.itemconfigure(item, width=event.width)
-            for label in (hint, log_label, self.progress_label):
+            for label in (hint, log_label, self.progress_label, self.result_body):
                 label.configure(wraplength=max(150, event.width - 40))
             status.configure(wraplength=max(150, event.width - 24))
 
@@ -298,7 +322,7 @@ class DependencyManagerWindow:
         self._resize()
 
     def _resize(self):
-        height = 250 + (340 if self.details_expanded else 0) + (330 if self.progress_frame.winfo_manager() else 0)
+        height = 250 + (340 if self.details_expanded else 0) + (330 if self.progress_frame.winfo_manager() else 0) + (190 if self.result_panel.winfo_manager() else 0)
         self.window.geometry(f"{max(720, self.window.winfo_width())}x{min(height, self.window.winfo_screenheight() - 100)}")
 
     def _show_progress(self):
@@ -310,6 +334,51 @@ class DependencyManagerWindow:
         self.progress_frame.grid()
         self.progress_bar.start(12)
         self._resize()
+
+    def _clear_result(self):
+        self.terminal_state = "running"
+        self.result_panel.grid_remove()
+        self.result_actions.grid_remove()
+        self.exit_button.configure(state="disabled", text="退出安装器")
+
+    def _render_result(self, payload):
+        completion = payload.get("completion") or {}
+        needs_shortcut = sys.platform == "win32" and self.operation_name in ("install", "project-update")
+        view = terminal_outcome(self.operation_name, payload["code"], completion,
+            payload.get("reason", ""), requires_shortcut=needs_shortcut)
+        self.terminal_state = view["state"]
+        self.last_code = view["code"]
+        palette = {"success": ("#EAF7EE", "#176A2D"), "failed": ("#FDECEC", "#B42318"),
+                   "cancelled": ("#FFF6DB", "#8A5B00"), "unconfirmed": ("#EEF4FF", "#1E40AF")}
+        background, foreground = palette[view["state"]]
+        self.result_panel.configure(background=background)
+        for label in (self.result_heading, self.result_body):
+            label.configure(background=background, foreground=foreground)
+        self.result_title.set(view["title"])
+        details = []
+        if view["detail"]:
+            details.append(redact(view["detail"])[:700])
+        details.append("目标路径：" + str(completion.get("target") or self.current_target))
+        if view["state"] == "success" and needs_shortcut:
+            shortcut = completion["shortcut"]
+            state = "已存在并验证" if shortcut.get("reused") else "已创建"
+            details.append("桌面快捷方式：" + state)
+        if completion.get("version"):
+            details.append("当前版本：" + str(completion["version"]))
+        self.result_detail.set("\n".join(details))
+        self.result_panel.grid()
+        self.result_actions.grid()
+        if view["retry"]:
+            self.retry_button.grid()
+        else:
+            self.retry_button.grid_remove()
+        self.exit_button.configure(state="disabled" if self.busy else "normal", text="退出安装器")
+        self._resize()
+        return view
+
+    def retry(self):
+        if not self.busy:
+            self.start(self.operation_name if self.operation_name in ("install", "project-update", "python") else "install")
 
     def choose_directory(self):
         selected = filedialog.askdirectory(parent=self.window, initialdir=self.directory.get())
@@ -338,9 +407,12 @@ class DependencyManagerWindow:
     def start(self, operation="install"):
         if self.busy or self.closing:
             return
+        self._clear_result()
+        self.operation_name = operation
+        self.current_target = self.directory.get()
         try:
             root = Path(self.directory.get()).expanduser().absolute()
-            project_directory(root)
+            self.current_target = str(project_directory(root))
             chosen_mirror = resolve_mirror(
                 root, ("tuna" if self.mirror.get() else "pypi") if self.mirror_changed else self.explicit_mirror)
             logs = root / ".dependency-manager" / "logs"
@@ -354,6 +426,7 @@ class DependencyManagerWindow:
         except (OSError, ValueError) as exc:
             self.status.set("无法开始：" + redact(str(exc)))
             self._append(self.status.get())
+            self._render_result({"code": 2, "reason": self.status.get()})
             return
         self.session = InstallerSession({
             "directory": str(root), "source": "1" if self.source.get() == "cnb" else "2",
@@ -385,10 +458,26 @@ class DependencyManagerWindow:
             code = 2
             completion_details = ""
             summary = ""
+            failure_reason = ""
+            completion = {}
             def output(value):
-                session.send("log", redact(str(value), ProxyConfig("env")))
+                nonlocal failure_reason
+                text = redact(str(value), ProxyConfig("env"))
+                if text.startswith(("安装失败：", "错误：", "无法开始：")):
+                    failure_reason = text
+                session.send("log", text)
+
+            def event(value):
+                if value.get("event") == "completion":
+                    completion.update(value)
+                else:
+                    session.send("progress", value)
 
             def review(plan):
+                nonlocal failure_reason
+                errors = plan.get("errors") if isinstance(plan, dict) else None
+                if errors:
+                    failure_reason = "; ".join(map(str, errors)) if isinstance(errors, (list, tuple)) else str(errors)
                 session.send("plan", redact(json.dumps(plan, ensure_ascii=False, indent=2), ProxyConfig("env")))
             try:
                 with (nullcontext() if operation == "project-update" else project_operation(root)):
@@ -401,8 +490,12 @@ class DependencyManagerWindow:
                         code = 0 if result["status"] == "success" else 130 if result["status"] == "cancelled" else 2
                         completion_details = redact(json.dumps(result, ensure_ascii=False, indent=2), ProxyConfig("env"))
                         if code == 0:
+                            completion.update(operation=operation, target=self.current_target,
+                                shortcut=result.get("shortcut"), up_to_date=result.get("up_to_date"),
+                                version=result.get("current_version"))
                             summary = ("主项目已是最新源码：" if result.get("up_to_date") else "主项目更新完成：") + result.get("current_version", "")
                         else:
+                            failure_reason = "; ".join(result.get("errors", []))
                             summary = "主项目更新已取消；请查看恢复记录。" if code == 130 else "主项目更新失败：" + "; ".join(result.get("errors", []))
                     elif operation == "python":
                         proxy = ProxyConfig("env")
@@ -412,15 +505,17 @@ class DependencyManagerWindow:
                                                phase_fn=lambda value: session.send("phase", value),
                                                plan_fn=review, cancel_event=session.cancel_event, mirror=chosen_mirror,
                                                backend=None if selected_backend == "auto" else selected_backend,
-                                               pipeline=True, event_fn=lambda value: session.send("progress", value))
+                                               pipeline=True, event_fn=event)
             except (KeyboardInterrupt, EOFError):
                 code = 130
             except Exception as exc:
+                failure_reason = redact(str(exc), ProxyConfig("env"))
                 completion_details = "安装失败：" + redact(str(exc), ProxyConfig("env"))
             finally:
                 if session.cancel_event.is_set():
                     code = 130
-                session.send("done", {"code": code, "details": completion_details, "summary": summary})
+                session.send("done", {"code": code, "details": completion_details, "summary": summary,
+                                      "completion": completion, "reason": failure_reason})
 
         self.worker = threading.Thread(target=work, name="coating-installer")
         self.worker.start()
@@ -497,16 +592,23 @@ class DependencyManagerWindow:
                 elif kind == "updates" and not session.cancel_event.is_set():
                     self.update_page = value
                 elif kind == "done":
+                    if session.cancel_event.is_set():
+                        value = {**value, "code": 130, "summary": ""}
                     if value["details"]:
                         self._append(value["details"], complete=True)
-                    self.last_code = value["code"]
+                    view = self._render_result(value)
                     self.operation_finished = time.monotonic()
                     self.download_progress.finish()
                     if self.last_code == 0 and self.active_phase is not None:
                         self.completed_phases.add(self.active_phase)
                     if self.last_code == 0 and self.operation_name == "project-update":
                         self.total_phases = max(1, len(self.completed_phases))
-                    self.status.set(value.get("summary") or {0: "操作完成。详见日志中的目标环境与后端核验结果。", 130: "已取消；已写入文件保留，请查看日志后重试。"}.get(self.last_code, "安装失败（" + self.current_phase + "）；请查看日志中的原因。"))
+                    if self.last_code == 130:
+                        self.status.set(view["title"] + "；已写入文件保留，可查看日志。")
+                    elif self.last_code != value["code"] or self.last_code != 0:
+                        self.status.set(view["title"] + "：" + view["detail"])
+                    else:
+                        self.status.set(value.get("summary") or view["title"])
                     self._append(self.status.get())
             if log_batch:
                 self._append("\n".join(log_batch), complete=True)
@@ -519,6 +621,7 @@ class DependencyManagerWindow:
                 control.configure(state="normal")
             self.cancel_button.configure(state="disabled")
             self.progress_bar.stop()
+            self.exit_button.configure(state="normal", text="退出安装器")
             self.backend_control.configure(state="readonly")
             self.update_button.configure(state="normal" if self.update_page else "disabled")
             if self.closing:
@@ -531,8 +634,11 @@ class DependencyManagerWindow:
             return
         elapsed = int((self.operation_finished or time.monotonic()) - self.operation_started)
         snapshot = self.download_progress.snapshot()
-        pieces = [f"已用 {elapsed // 60:02d}:{elapsed % 60:02d}",
-                  f"已完成阶段 {len(self.completed_phases)}/{self.total_phases}"]
+        pieces = [f"已用 {elapsed // 60:02d}:{elapsed % 60:02d}"]
+        if self.terminal_state in ("success", "failed", "cancelled", "unconfirmed"):
+            pieces.append(self.result_title.get())
+        else:
+            pieces.append(f"已完成阶段 {len(self.completed_phases)}/{self.total_phases}")
         if any(row["active"] for row in snapshot["components"].values()):
             pieces.append("总下载速度 " + byte_text(snapshot["speed"]) + "/s")
         transfers = []
@@ -567,6 +673,9 @@ class DependencyManagerWindow:
     def check_updates(self):
         if self.busy or self.closing:
             return
+        self._clear_result()
+        self.operation_name = "check-updates"
+        self.current_target = self.directory.get()
         root = Path(self.directory.get()).expanduser().absolute()
         provider, channel = self.source.get(), self.update_channel.get()
         self.log_file = None
@@ -645,6 +754,17 @@ class DependencyManagerWindow:
         if self.busy:
             self.closing = True
             self.cancel()
+            self.result_title.set("■ 正在安全退出…")
+            self.result_detail.set("已请求取消，正在等待当前步骤安全结束。窗口会在收尾完成后关闭。")
+            self.result_panel.configure(background="#FFF6DB")
+            for label in (self.result_heading, self.result_body):
+                label.configure(background="#FFF6DB", foreground="#8A5B00")
+            self.result_panel.grid()
+            self.result_actions.grid()
+            self.retry_button.grid_remove()
+            self.exit_button.configure(state="disabled", text="正在安全退出…")
+            self.status.set("正在安全退出：等待当前步骤收尾，请勿强制终止。")
+            self._resize()
         else:
             self.window.destroy()
 

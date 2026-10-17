@@ -471,3 +471,15 @@ def test_pipeline_failure_joins_owned_worker_without_turning_failure_into_cancel
     assert subject.run_interactive(root, prompt_fn=lambda key,*unused: choices[key], output=lambda value: None, pipeline=True, cancel_event=cancel) == 2
     assert stopped.is_set() and not cancel.is_set()
     calls["plan_project_deployment"].assert_not_called()
+
+
+def test_install_completion_event_contains_verified_desktop_status(flow):
+    root, calls, _ = flow
+    calls["ensure_desktop_shortcut"].return_value = {"status": "success", "path": "test-desktop/link.lnk", "reused": True}
+    events = []
+    answers = iter(["", "", "", "", "y"])
+    assert subject.run_interactive(root, input_fn=lambda p: next(answers), output=lambda v: None, event_fn=events.append) == 0
+    done = next(row for row in events if row.get("event") == "completion")
+    assert done["target"] == str(root / "app")
+    if subject.sys.platform == "win32":
+        assert done["shortcut"]["reused"] is True

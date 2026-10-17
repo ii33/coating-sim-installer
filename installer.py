@@ -67,6 +67,7 @@ def main(argv=None):
     parser.add_argument("--self-check", action="store_true", help="Offline Tk/resource self-check; never install")
     parser.add_argument("--self-check-output", type=Path)
     parser.add_argument("--smoke-gui", action="store_true", help="Open GUI briefly without invoking installation")
+    parser.add_argument("--smoke-outcome", choices=("install", "updated", "current", "failed", "cancelled"), help="Display-only terminal-state QA; never install or update")
     parser.add_argument("--verify-private-runtime", action="store_true", help="Explicit diagnostic: deploy/reuse private Python at the explicitly selected project")
     parser.add_argument("--verify-venv", type=Path, help="Explicit diagnostic: create a new no-pip venv at this selected path")
     parser.add_argument("--python", type=Path, help="Normal external CPython for --verify-venv")
@@ -111,17 +112,39 @@ def main(argv=None):
     root = tk.Tk()
     app = DependencyManagerWindow(root, project)
     visible = {}
-    if args.smoke_gui:
+    if args.smoke_outcome:
+        app.operation_name = "project-update" if args.smoke_outcome in ("updated", "current") else "install"
+        app.current_target = str(project)
+        app._show_progress()
+        app._append("Display-only outcome QA; no installation or update was performed.")
+        code = 2 if args.smoke_outcome == "failed" else 130 if args.smoke_outcome == "cancelled" else 0
+        app._render_result({"code": code, "reason": "测试目录写入被拒绝；文件已保留，可重试。",
+            "completion": {"target": str(project), "shortcut": {"status": "success", "reused": args.smoke_outcome == "current"},
+                           "up_to_date": args.smoke_outcome == "current", "version": "display-only QA"}})
+        app.status.set(app.result_title.get())
+        app.progress_bar.stop()
+        app._update_progress()
+    if args.smoke_gui or args.smoke_outcome:
         def finish_smoke():
             visible.update(operation="installer_gui_smoke", version=VERSION,
                            visible=bool(root.winfo_viewable()), geometry=root.geometry(),
                            source=app.source.get(), channel=app.update_channel.get(),
                            project=str(project), worker_started=app.busy)
-            app.close()
+            if args.smoke_outcome:
+                visible.update(operation="installer_outcome_smoke", simulated_outcome=args.smoke_outcome,
+                    terminal_state=app.terminal_state, result_title=app.result_title.get(),
+                    result_visible=bool(app.result_panel.winfo_viewable()), exit_visible=bool(app.exit_button.winfo_viewable()),
+                    exit_enabled=str(app.exit_button.cget("state")) == "normal",
+                    exit_within_window=app.exit_button.winfo_rooty() + app.exit_button.winfo_height() <= root.winfo_rooty() + root.winfo_height())
+                app.exit_button.invoke()
+            else:
+                app.close()
         root.after(1800, finish_smoke)
     root.mainloop()
-    if args.smoke_gui:
+    if args.smoke_gui or args.smoke_outcome:
         visible["status"] = "success" if visible.get("visible") and not visible.get("worker_started") else "failed"
+        if args.smoke_outcome and not (visible.get("result_visible") and visible.get("exit_visible") and visible.get("exit_enabled") and visible.get("exit_within_window")):
+            visible["status"] = "failed"
         write_report(args.self_check_output, visible)
         return 0 if visible["status"] == "success" else 2
     return 0

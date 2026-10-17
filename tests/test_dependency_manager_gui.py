@@ -285,7 +285,7 @@ def test_close_waits_for_owned_worker_cleanup(window, monkeypatch, tmp_path):
     assert cleaning.wait(2)
     window.update()
     assert window.winfo_exists() and app.busy
-    assert "正在取消" in app.status.get()
+    assert "正在安全退出" in app.status.get()
     # Keep the fixture root available after observing the delayed close request.
     from unittest.mock import MagicMock
     destroy = MagicMock()
@@ -610,3 +610,94 @@ def test_project_update_noop_failure_and_cancel_are_clear(window, monkeypatch, t
     app.start("project-update")
     pump(window, lambda: not app.busy)
     assert app.last_code == 130 and "取消" in app.status.get()
+
+
+def test_success_banner_contains_target_shortcut_and_exit_closes(window, monkeypatch, tmp_path):
+    from unittest.mock import MagicMock
+    target = tmp_path / "installed" / "app"
+    def flow(project, **kwargs):
+        kwargs["event_fn"]({"event": "completion", "operation": "install", "target": str(target),
+                            "shortcut": {"status": "success", "reused": False}})
+        return 0
+    monkeypatch.setattr(gui, "run_interactive", flow)
+    app = gui.DependencyManagerWindow(window, tmp_path / "installed")
+    window.deiconify()
+    app.start()
+    pump(window, lambda: not app.busy)
+    assert app.terminal_state == "success" and "安装完成" in app.result_title.get()
+    assert str(target) in app.result_detail.get() and "已创建" in app.result_detail.get()
+    assert app.result_panel.winfo_viewable() and app.exit_button.winfo_viewable()
+    assert str(app.exit_button.cget("state")) == "normal"
+    assert not app.retry_button.winfo_viewable() and not app.details_frame.winfo_viewable()
+    destroy = MagicMock()
+    with monkeypatch.context() as patch:
+        patch.setattr(window, "destroy", destroy)
+        app.exit_button.invoke()
+        destroy.assert_called_once()
+    assert app.worker is None and app.session is None
+
+
+@pytest.mark.parametrize("current,title", [(False, "更新完成"), (True, "已是最新版")])
+def test_update_success_and_already_current_have_distinct_banners(window, monkeypatch, tmp_path, current, title):
+    monkeypatch.setattr(gui, "update_project", lambda *a, **k: {"status": "success", "up_to_date": current,
+        "current_version": "dev.20261017.99", "shortcut": {"status": "success", "reused": True}})
+    app = gui.DependencyManagerWindow(window, tmp_path / "updated")
+    app.start("project-update")
+    pump(window, lambda: not app.busy)
+    assert title in app.result_title.get() and app.terminal_state == "success"
+    assert "已存在并验证" in app.result_detail.get() and "dev.20261017.99" in app.result_detail.get()
+
+
+def test_failure_retry_clears_terminal_state_and_can_succeed(window, monkeypatch, tmp_path):
+    attempts = []
+    def flow(project, **kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise ValueError("没有写入权限，请选择可写目录")
+        kwargs["event_fn"]({"event": "completion", "target": str(project), "shortcut": {"status": "success"}})
+        return 0
+    monkeypatch.setattr(gui, "run_interactive", flow)
+    app = gui.DependencyManagerWindow(window, tmp_path / "retry")
+    window.deiconify()
+    app.start()
+    pump(window, lambda: not app.busy)
+    assert app.terminal_state == "failed" and "权限" in app.result_detail.get()
+    assert app.retry_button.winfo_viewable()
+    app.retry_button.invoke()
+    pump(window, lambda: not app.busy)
+    assert len(attempts) == 2 and app.terminal_state == "success"
+    assert not app.retry_button.winfo_viewable()
+
+
+def test_shortcut_failure_cannot_show_all_success_and_cancel_wins_over_stale_success(window, monkeypatch, tmp_path):
+    def flow(project, **kwargs):
+        kwargs["event_fn"]({"event": "completion", "target": str(project),
+            "shortcut": {"status": "failed", "errors": ["Desktop is read-only"]}})
+        return 0
+    monkeypatch.setattr(gui, "run_interactive", flow)
+    app = gui.DependencyManagerWindow(window, tmp_path / "shortcut-failed")
+    app.start()
+    pump(window, lambda: not app.busy)
+    assert app.last_code == 2 and app.terminal_state == "failed"
+    assert "Desktop is read-only" in app.result_detail.get() and "安装完成" not in app.result_title.get()
+    def cancelled(project, **kwargs):
+        kwargs["cancel_event"].set()
+        kwargs["event_fn"]({"event": "completion", "shortcut": {"status": "success"}})
+        return 0
+    monkeypatch.setattr(gui, "run_interactive", cancelled)
+    app.start()
+    pump(window, lambda: not app.busy)
+    assert app.last_code == 130 and app.terminal_state == "cancelled" and "已取消" in app.result_title.get()
+
+
+def test_queued_success_cannot_override_a_cancel_request(window, tmp_path):
+    app = gui.DependencyManagerWindow(window, tmp_path / "queued-success")
+    app.operation_name = "install"
+    app._show_progress()
+    app.session = gui.InstallerSession({})
+    app.session.events.put_nowait(("done", {"code": 0, "details": "", "summary": "安装成功",
+        "completion": {"shortcut": {"status": "success"}}}))
+    app.session.cancel()
+    app._drain()
+    assert app.last_code == 130 and app.terminal_state == "cancelled"
+    assert "已取消" in app.result_title.get() and "安装成功" not in app.status.get()
