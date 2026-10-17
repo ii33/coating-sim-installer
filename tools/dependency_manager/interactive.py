@@ -189,7 +189,7 @@ def run_interactive(
             say("已有 venv 将保持原解释器；创建用 Python 不会替换它。")
         else:
             phase("python")
-            found = discover_python("cpu", project=root, cancel_event=cancel)
+            found = discover_python("directml" if sys.platform == "win32" else "cpu", project=root, cancel_event=cancel, preferred_minor="3.12")
             if found.get("status") == "cancelled":
                 raise KeyboardInterrupt
             python = found.get("selected_python")
@@ -207,7 +207,7 @@ def run_interactive(
                 show(plan)
             elif not python:
                 show(plan)
-            if plan.get("status") == "ready" and yes(
+            if not python and plan.get("status") == "ready" and yes(
                 "确认上述官方来源、SHA256、目录与许可，安装独立 Python？已有兼容 Python 可跳过",
                 "python",
             ):
@@ -230,11 +230,13 @@ def run_interactive(
                 )
                 return 2
         phase("recommend")
-        recommendation = recommend_environment(identity, cancel_event=cancel)
+        recommendation = recommend_environment(identity, cancel_event=cancel, proxy=proxy)
         if cancel.is_set() or recommendation.get("status") == "cancelled":
             raise KeyboardInterrupt
         show(recommendation)
         backend = recommendation.get("selected_backend", "cpu")
+        if sys.platform != "win32":
+            say("DirectML 已跳过：本平台不支持 Windows 默认 DirectML 配置。")
         if existing:
             say("按上述硬件建议生成依赖计划；保留既有解释器，包冲突由计划检查。")
         if app.exists():
@@ -315,10 +317,14 @@ def run_interactive(
         inspected = inspect_environment(app, app / ".venv", END_USER_GROUPS, backend, profile)
         actual = inspected.get("target") or {}
         if actual.get("valid"):
-            verified = recommend_environment(actual, manual_backend=backend, cancel_event=cancel)
+            installed = result.get("dependency_result", result)
+            verified = installed.get("compute_validation") or recommend_environment(actual, manual_backend=backend, cancel_event=cancel, proxy=proxy, check_wheels=False)
             if cancel.is_set() or verified.get("status") == "cancelled":
                 raise KeyboardInterrupt
             show(verified)
+            say("验证后建议计算后端：" + str(verified.get("recommended_backend", "cpu")))
+            for probe_backend, diagnostic in verified.get("probe_diagnostics", {}).items():
+                say(probe_backend + " isolated probe: " + json.dumps(diagnostic, ensure_ascii=False))
             if backend != "cpu":
                 usable = verified.get("backend_usable", {}).get(backend) is True
                 say(

@@ -11,3 +11,4 @@ dist/
 *.log
 *.tmp
 qa-output/
+.qa-temp/

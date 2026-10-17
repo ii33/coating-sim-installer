@@ -16,15 +16,16 @@ import sys
 import tempfile
 from pathlib import Path
 
+from .cuda_policy import REFERENCES, wheel_evidence
+from .cuda_policy import candidates as cuda_candidates
 from .external_program import run as external_run
 
 END_USER_GROUPS = ("desktop", "appearance")
 PROBE_TIMEOUT = 4
 MAX_DEVICES = 16
-_BACKENDS = ("cpu", "cuda12", "directml", "rocm", "xpu")
-# CUDA 12 minor-compatibility baseline, NOT a guarantee for every PTX/kernel.
-# https://docs.nvidia.com/cuda/archive/12.1.0/cuda-toolkit-release-notes/index.html
-_DRIVER_MIN = {"linux": (525, 60, 13), "win32": (527, 41, 0)}
+_BACKENDS = ("cpu", "cuda12", "cuda13", "directml", "rocm", "xpu")
+RUNTIME_PROBE_TIMEOUT = 20
+
 
 
 # Self-contained subprocess scripts: importing the app core would import its
@@ -49,7 +50,8 @@ try:
     if isinstance(raw_name, bytes):
         raw_name = raw_name.decode("utf-8", "replace")
     name = str(raw_name).replace("\x00", "").strip()[:160]
-    result = {"available": True, "name": name, "reason": ""}
+    result = {"available": True, "name": name, "reason": "",
+              "cuda_runtime_major": int(cp.cuda.runtime.runtimeGetVersion()) // 1000}
 except Exception as exc:
     result = {"available": False, "name": "", "reason":
               (type(exc).__name__ + (": " + str(exc) if str(exc) else ""))[:240]}
@@ -168,13 +170,14 @@ def _visible_gpus(host_platform):
                 warnings.append("macOS display adapter probe returned invalid data")
     smi = shutil.which("nvidia-smi")
     if smi and host_platform in ("linux", "win32"):
-        output = _run([smi, "--query-gpu=name,driver_version,compute_cap", "--format=csv,noheader,nounits"])
+        output = _run([smi, "--query-gpu=index,name,driver_version,compute_cap", "--format=csv,noheader,nounits"])
         if output is not None:
             for row in list(csv.reader(io.StringIO(output)))[:MAX_DEVICES]:
-                if len(row) == 3:
-                    devices.append({"name": row[0].strip()[:160], "vendor": "nvidia",
-                                    "driver": row[1].strip()[:80],
-                                    "compute_capability": row[2].strip()[:16], "source": "nvidia_smi"})
+                if len(row) == 4:
+                    devices.append({"index": row[0].strip()[:8],
+                                    "name": row[1].strip()[:160], "vendor": "nvidia",
+                                    "driver": row[2].strip()[:80],
+                                    "compute_capability": row[3].strip()[:16], "source": "nvidia_smi"})
         else:
             warnings.append("NVIDIA driver/device probe unavailable or timed out")
     return devices, warnings
@@ -184,95 +187,142 @@ def _runtime_probe(executable, backend):
     # Mirror the simulator's numerical device checks without importing Qt, NumPy,
     # or GPU packages into the dependency-manager process.
     from .manager import clean_environment
-    script = _CUDA_PROBE if backend == "cuda12" else _DIRECTML_PROBE
+    script = _CUDA_PROBE if backend in ("cuda12", "cuda13") else _DIRECTML_PROBE
     with tempfile.TemporaryDirectory(prefix="coat-device-probe-") as cache:
         env = clean_environment()
         env["CUPY_CACHE_DIR"] = cache
-        output = _run([str(executable), "-I", "-B", "-c", script], env=env)
+        try:
+            completed = external_run([str(executable), "-I", "-B", "-c", script], env=env,
+                                     capture_output=True, text=True, timeout=RUNTIME_PROBE_TIMEOUT,
+                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except subprocess.TimeoutExpired:
+            return {"available": False, "reason": "Isolated device probe timed out; no GPU availability claim"}
+        except (OSError, UnicodeError) as exc:
+            return {"available": False, "reason": "Isolated device probe failed: " + type(exc).__name__}
+        code = completed.returncode
+        if code:
+            native = code & 0xFFFFFFFF
+            return {"available": False, "exit_code": code, "reason":
+                    f"Isolated device process exited {code} / 0x{native:08X}; "
+                    + ("native access violation; driver/runtime failure, not proof of out-of-memory"
+                       if native == 0xC0000005 else "driver/runtime probe failed; CPU retained")}
+        output = completed.stdout if len(completed.stdout) <= 65536 else ""
     marker = "__COAT_SIM_DEVICE_PROBE__="
     for line in (output or "").splitlines():
         if line.startswith(marker):
             try:
                 result = json.loads(line[len(marker):])
-                return result.get("available") is True
+                if not isinstance(result, dict) or type(result.get("available")) is not bool:
+                    break
+                return result
             except (ValueError, AttributeError):
                 break
-    return False
+    return {"available": False, "reason": "Isolated device probe produced no valid result"}
 
 
 def _cuda_candidate(device, target_platform):
-    if device.get("source") != "nvidia_smi":
-        return False
-    try:
-        driver = tuple(int(n) for n in device["driver"].split("."))
-        driver = (driver + (0, 0, 0))[:3]
-        capability = float(device.get("compute_capability", ""))
-        # CuPy 13 CUDA12 installation candidate, conservative known architecture
-        # range; unknown/future architectures need manual verification.
-        return driver >= _DRIVER_MIN[target_platform] and 5.0 <= capability <= 9.0
-    except (ValueError, TypeError, KeyError):
-        return False
+    # Compatibility helper for existing callers, sharing the single policy.
+    target = {'platform': target_platform, 'python': '3.12.10',
+              'machine': 'x86_64', 'implementation': 'CPython'}
+    return 'cuda12' in cuda_candidates([device], target)[0]
 
 
-def recommend_environment(python_identity=None, manual_backend=None, cancel_event=None):
-    """Return evidence and advice; never override an explicit backend selection.
-
-    python_identity is a verified manager.probe_python/discover_python identity.
-    Without one, host evidence is returned but automatic GPU choice stays CPU.
-    Up to two hardware probes and two target kernel probes, 4 seconds each.
-    """
+def recommend_environment(python_identity=None, manual_backend=None, cancel_event=None,
+                          proxy=None, check_wheels=True):
+    """Read-only advice; root wheels and device math are separate evidence."""
     if manual_backend is not None and manual_backend not in _BACKENDS:
-        raise ValueError("Unknown compute backend")
-    host = {"platform": sys.platform, "os": platform.system(),
-            "release": platform.release(), "machine": platform.machine()}
-    # Return only the bounded fields needed for compatibility, never inventory
-    # or environment variables/credentials.
-    identity = python_identity or {}
-    target = {key: identity.get(key) for key in
-              ("executable", "python", "platform", "machine", "implementation")}
+        raise ValueError('Unknown compute backend')
+    host = {'platform': sys.platform, 'os': platform.system(),
+            'release': platform.release(), 'machine': platform.machine()}
+    target = {key: (python_identity or {}).get(key) for key in
+              ('executable', 'python', 'platform', 'machine', 'implementation')}
     def cancelled():
         return cancel_event is not None and cancel_event.is_set()
-    devices, warnings = ([], []) if cancelled() else _visible_gpus(host["platform"])
-    backend, reason = "cpu", "CPU fallback: no verified compatible GPU backend"
-    usable = {"cpu": None, "cuda12": False, "directml": False}
-    target_platform = target.get("platform")
-    compatible = (target.get("implementation") == "CPython"
-                  and bool(re.match(r"3\.1[0-3]\.", str(target.get("python", ""))))
-                  and target_platform == host["platform"])
-    x64 = str(target.get("machine", "")).lower() in ("amd64", "x86_64")
-    cuda_platform = compatible and x64 and target_platform in _DRIVER_MIN
-    dml_platform = (compatible and x64 and target_platform == "win32"
-                    and bool(re.match(r"3\.1[0-2]\.", str(target.get("python", "")))))
-    executable = target.get("executable")
-    if executable and cuda_platform and not cancelled():
-        usable["cuda12"] = _runtime_probe(executable, "cuda12")
-    if executable and dml_platform and not cancelled():
-        usable["directml"] = _runtime_probe(executable, "directml")
-    if usable["cuda12"]:
-        backend, reason = "cuda12", "CUDA target interpreter passed a numerical device probe"
-    elif usable["directml"]:
-        backend, reason = "directml", "DirectML target interpreter passed a numerical device probe"
-    elif cuda_platform and any(_cuda_candidate(device, target_platform) for device in devices):
-        backend = "cuda12"
-        reason = "CUDA12 install candidate: compatible NVIDIA device/driver evidence; runtime not yet verified"
-    elif not compatible:
-        reason = "CPU fallback: select a supported CPython interpreter before GPU recommendation"
-    elif devices:
-        reason = "CPU fallback: visible display adapters do not establish a supported working compute backend"
-    if backend == "cuda12" and not usable["cuda12"]:
-        warnings.append("CUDA runtime/toolkit and wheel compatibility still need install-plan resolution and a post-install numerical probe")
-    warnings.append("Mitsuba/DrJit appearance dependencies are separate from deposition GPU backends; GPU support is not universal")
+    devices, warnings = ([], []) if cancelled() else _visible_gpus(sys.platform)
+    backend, reason = 'cpu', 'CPU: no verified compatible GPU target'
+    usable = {'cpu': None, 'cuda12': False, 'cuda13': False, 'directml': False}
+    diagnostics, wheels = {}, []
+    compatible = (target.get('platform') == sys.platform and
+                  target.get('implementation') == 'CPython' and
+                  str(target.get('machine', '')).lower() in ('amd64', 'x86_64'))
+    choices, cuda_reason = cuda_candidates(devices, target)
+    if not compatible:
+        choices = []
+    if compatible and target.get('executable') and not cancelled():
+        probe = _runtime_probe(target['executable'], 'cuda12')
+        diagnostics['cuda'] = probe if isinstance(probe, dict) else {'available': probe is True}
+        major = diagnostics['cuda'].get('cuda_runtime_major')
+        for known in ('cuda12', 'cuda13'):
+            usable[known] = diagnostics['cuda'].get('available') is True and major == int(known[-2:])
+    for choice in choices:
+        if cancelled():
+            break
+        try:
+            evidence = (wheel_evidence(choice, target, proxy, cancel_event) if check_wheels
+                        else {'available': True, 'reason': 'Post-install binary resolver already ran'})
+        except InterruptedError:
+            return {'status': 'cancelled', 'selected_backend': 'cpu', 'warnings': [], 'errors': []}
+        wheels.append(evidence)
+        if evidence.get('available') is True:
+            if not check_wheels and not usable[choice]:
+                continue
+            backend, reason = choice, cuda_reason + '; ' + evidence['reason']
+            major = diagnostics.get('cuda', {}).get('cuda_runtime_major')
+            break
+    dml_platform = (compatible and target.get('platform') == 'win32' and
+                    bool(re.match(r'3\.1[0-2]\.', str(target.get('python', '')))))
+    if dml_platform and target.get('executable') and not cancelled():
+        probe = _runtime_probe(target['executable'], 'directml')
+        diagnostics['directml'] = probe if isinstance(probe, dict) else {'available': probe is True}
+        usable['directml'] = diagnostics['directml'].get('available') is True
+        if backend == 'cpu' and usable['directml']:
+            backend, reason = 'directml', 'DirectML isolated numerical probe passed'
+    if backend == 'cpu':
+        reason = cuda_reason + '; no verified CUDA/wheel combination; CPU retained'
+    dml_default = sys.platform == 'win32'
+    warnings.append('Windows desktop installs DirectML by default; package presence is not device validation.')
+    if sys.platform != 'win32':
+        warnings.append('DirectML skipped: no supported default profile on this platform')
+    if dml_default and not dml_platform:
+        warnings.append('Default DirectML needs x64 CPython 3.10-3.12. Preserve an incompatible existing environment and select a new installation directory with Python 3.12.')
+    if backend.startswith('cuda'):
+        warnings.append('CUDA preferred for deposition, pending binary-only resolution and isolated numerical verification. No driver or system Toolkit install.')
     if manual_backend:
-        warnings.append("Manual backend selection preserved; compatibility is validated by the install planner")
-    suggested = ("directml" if dml_platform and backend == "cpu"
-                 and any(d.get("vendor") in ("amd", "intel", "nvidia") for d in devices)
-                 else backend if backend != "cpu" else None)
-    return {"schema_version": 1, "host": host, "python": target,
-            "status": "cancelled" if cancelled() else "success",
-            "operation": "runtime_recommendation",
-            "suggested_candidate": suggested,
-            "visible_gpus": devices, "recommended_backend": backend,
-            "selected_backend": manual_backend or backend,
-            "backend_usable": usable, "reason": reason, "warnings": warnings,
-            "groups": list(END_USER_GROUPS), "profile": "runtime",
-            "install_requires_confirmation": True}
+        warnings.append('Explicit backend retained for verification; failure never claims GPU usability')
+    warnings.append('Film CUDA PyTorch needs a separate manual environment: do not replace DirectML-pinned torch 2.4.1. Mitsuba/DrJit has independent CPU/CUDA/OptiX requirements.')
+    return {'schema_version': 1, 'host': host, 'python': target,
+            'status': 'cancelled' if cancelled() else 'success',
+            'operation': 'runtime_recommendation', 'visible_gpus': devices,
+            'recommended_backend': backend, 'selected_backend': manual_backend or backend,
+            'suggested_candidate': backend if backend != 'cpu' else ('directml' if dml_platform else None),
+            'backend_usable': usable, 'probe_diagnostics': diagnostics, 'wheel_evidence': wheels,
+            'reason': reason, 'warnings': warnings, 'references': list(REFERENCES),
+            'modules': {'deposition': backend, 'directml_default_install': dml_default,
+                        'film': 'CPU; CUDA Torch requires a separate manually managed environment',
+                        'appearance': 'Mitsuba 3.9.0 / DrJit 1.4.0 independent CPU/CUDA/OptiX probe'},
+            'groups': list(END_USER_GROUPS), 'profile': 'runtime',
+            'install_requires_confirmation': True}
+
+
+def verify_installed_backends(executable, backend, directml_default=False, cancel_event=None):
+    """Run isolated minimal math after package verification; never installs/retries."""
+    usable = {'cpu': True, 'cuda12': False, 'cuda13': False, 'directml': False}
+    diagnostics = {}
+    for name in ([backend] if backend.startswith('cuda') else []) + (['directml'] if directml_default or backend == 'directml' else []):
+        if cancel_event is not None and cancel_event.is_set():
+            return {'status': 'cancelled', 'recommended_backend': 'cpu', 'probe_diagnostics': diagnostics}
+        result = _runtime_probe(executable, name)
+        diagnostics[name] = result
+        usable[name] = result.get('available') is True
+        if name.startswith('cuda'):
+            usable[name] = usable[name] and result.get('cuda_runtime_major') == int(name[-2:])
+            if result.get('available') and not usable[name]:
+                diagnostics[name] = dict(result, available=False, reason='Installed CUDA runtime major differs from the approved profile')
+    if cancel_event is not None and cancel_event.is_set():
+        return {'status': 'cancelled', 'recommended_backend': 'cpu', 'probe_diagnostics': diagnostics}
+    selected = backend if usable.get(backend) else ('directml' if usable['directml'] else 'cpu')
+    return {'operation': 'post_install_compute_validation', 'status': 'success',
+            'selected_backend': backend, 'recommended_backend': selected,
+            'backend_usable': usable, 'probe_diagnostics': diagnostics,
+            'reason': 'Isolated minimal numerical checks only; no full job, precision or performance qualification',
+            'warnings': [] if usable.get(backend) else ['Requested GPU failed; use the reported fallback. No driver was changed or automatic package reinstall attempted.']}

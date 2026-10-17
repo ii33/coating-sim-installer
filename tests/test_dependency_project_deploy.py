@@ -56,6 +56,10 @@ class DeploymentTests(unittest.TestCase):
         return ""
 
     def prepare(self, **kwargs):
+        # These tests isolate checkout transaction safety, independent of the
+        # runner's Python minor. Windows desktop/DirectML compatibility has its
+        # own explicit 3.12/3.13 gate tests.
+        kwargs.setdefault("groups", ("cpu",))
         with patch.object(deploy, "_run_git", side_effect=self.fake_git), patch.object(deploy.shutil, "which", return_value=self.git):
             return deploy.plan_project_deployment(self.directory, python=sys.executable, **kwargs)
 

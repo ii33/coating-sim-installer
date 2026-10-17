@@ -77,13 +77,13 @@ class ManagerTests(unittest.TestCase):
     def test_real_project_catalog_covers_exact_runtime_requirements(self):
         unused, rows = manager.catalog(ROOT, ("desktop",))
         self.assertEqual(manager.catalog(ROOT, ("desktop",))[0], ["desktop"])
-        self.assertEqual(len(rows), 15)
+        self.assertEqual(len(rows), 16 if sys.platform == "win32" else 15)
         self.assertEqual(
             {r["requirement"] for r in rows},
             {
                 r["requirement"]
                 for r in manager._read_requirements(ROOT / "requirements.txt")
-            },
+            } | ({"torch-directml==0.2.5.dev240914"} if sys.platform == "win32" else set()),
         )
 
     def test_development_profile_adds_only_direct_test_and_static_tools(self):
@@ -103,7 +103,7 @@ class ManagerTests(unittest.TestCase):
         self.assertNotIn("mitsuba", development_by_name)
         self.assertNotIn("drjit", development_by_name)
         self.assertNotIn("cupy-cuda12x", development_by_name)
-        self.assertNotIn("torch-directml", development_by_name)
+        self.assertEqual("torch-directml" in development_by_name, sys.platform == "win32")
 
     def test_development_profile_does_not_select_cpu_or_render_features(self):
         _, rows = manager.catalog(
@@ -588,7 +588,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_fixed_manifest_official_hashes_and_architecture(self):
         manifest = runtime.runtime_manifest()
-        self.assertEqual(manifest["version"], "3.13.16")
+        self.assertEqual(manifest["version"], "3.12.10")
         for arch in ("AMD64", "x86", "ARM64"):
             plan = runtime.plan_runtime(
                 self.directory, proxy=self.proxy, platform_name="win32", machine=arch
@@ -600,7 +600,7 @@ class RuntimeTests(unittest.TestCase):
         for kwargs in (
             {"platform_name": "linux", "machine": "AMD64"},
             {"platform_name": "win32", "machine": "sparc"},
-            {"platform_name": "win32", "machine": "AMD64", "backend": "directml"},
+            {"platform_name": "win32", "machine": "ARM64", "backend": "directml"},
         ):
             self.assertEqual(
                 runtime.plan_runtime(self.directory, proxy=self.proxy, **kwargs)[

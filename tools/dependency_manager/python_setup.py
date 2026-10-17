@@ -1,5 +1,6 @@
 """Explicit project-Python preparation; the frozen tool is never a venv base."""
 import json
+import sys
 
 from .mirrors import redact
 from .python_discovery import discover_python
@@ -7,7 +8,7 @@ from .runtime import execute_runtime, plan_runtime
 
 
 def prepare_python(project, proxy, cancel_event, review, output, prompt):
-    found = discover_python("cpu", project=project, cancel_event=cancel_event)
+    found = discover_python("directml" if sys.platform == "win32" else "cpu", project=project, cancel_event=cancel_event, preferred_minor="3.12")
     if cancel_event.is_set() or found.get("status") == "cancelled":
         return 130, "", "已取消 Python 检查。"
     existing = found.get("selected_python")

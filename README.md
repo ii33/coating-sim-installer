@@ -1,5 +1,8 @@
 # Coating Sim 在线安装器
 
+未发布源码候选：Windows 默认安装 DirectML，应用环境优先 Python 3.12，沉积依赖按硬件选择 CUDA12/13。
+详情及验证边界见 [硬件选择规则](docs/hardware-cuda-selection.md)；已发布 alpha.1 EXE 不包含这些改动。
+
 [English](README.en.md) · [下载 Windows x64 单文件 EXE](https://github.com/ii33/coating-sim-installer/releases)
 
 独立的标准库 Tk 安装器，为公开项目 [ii33/coating-sim](https://github.com/ii33/coating-sim) 准备源码、完整 Python、Git、隔离依赖环境和启动入口。本仓库不包含镀膜算法、项目数据或预装的科学计算依赖。

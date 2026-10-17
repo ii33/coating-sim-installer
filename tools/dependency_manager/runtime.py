@@ -130,13 +130,13 @@ def plan_runtime(
         [
             "This is a separate normal CPython for creating project venvs; the bundled tool runtime is never used with -m venv",
             "Windows full installer creates per-user maintenance/uninstall records; no PATH, launcher, associations or shortcuts",
-            "Project tests were verified with Python 3.12; Python 3.13 package/wheel resolution is checked before installation, not assumed",
+            "Application default is CPython 3.12; the installer executable runtime is independent. Existing same-minor registrations are preserved and reused, never overwritten",
             "If prerequisites require administrator access, stop and report the prerequisite; this tool never requests elevation",
         ],
     )
-    if backend not in ("cpu", "cuda12", "directml", "rocm", "xpu"):
+    if backend not in ("cpu", "cuda12", "cuda13", "directml", "rocm", "xpu"):
         errors.append("Unknown backend")
-    if backend == "cuda12" and machine != "x86_64":
+    if backend in ("cuda12", "cuda13") and machine != "x86_64":
         errors.append("Managed CUDA12 wheel profile requires x86-64")
     registered = (
         _registered_python_paths(manifest["version"])
@@ -153,10 +153,8 @@ def plan_runtime(
         )
     if machine not in manifest["artifacts"]:
         errors.append("Unsupported Windows architecture")
-    if backend == "directml":
-        errors.append(
-            "Managed CPython 3.13 does not support DirectML's Python 3.10–3.12 wheel profile; choose an existing compatible Python"
-        )
+    if backend == "directml" and machine != "x86_64":
+        errors.append("DirectML requires an x86-64 Python wheel target")
     if backend in ("rocm", "xpu"):
         errors.append("This vendor backend requires a manual environment")
     if directory.exists():

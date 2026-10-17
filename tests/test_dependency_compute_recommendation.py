@@ -19,6 +19,7 @@ def probes(monkeypatch):
     monkeypatch.setattr(cr.sys, "platform", "win32")
     monkeypatch.setattr(cr, "_visible_gpus", lambda _: ([], []))
     monkeypatch.setattr(cr, "_runtime_probe", lambda *_: False)
+    monkeypatch.setattr(cr, "wheel_evidence", lambda *a: {"available": True, "reason": "fixture wheel metadata"})
 
 
 def test_end_user_groups_include_renderer_and_no_developer_tools():
@@ -137,10 +138,10 @@ def test_windows_cim_malformed_is_safe(probes, monkeypatch):
 
 
 def test_cuda_driver_baselines_and_cim_not_cuda_evidence():
-    gpu = {"source": "nvidia_smi", "compute_capability": "8.9", "driver": "525.60.13"}
+    gpu = {"source": "nvidia_smi", "compute_capability": "8.9", "driver": "530.30.02"}
     assert cr._cuda_candidate(gpu, "linux")
     assert not cr._cuda_candidate(gpu, "win32")
-    gpu["driver"] = "527.41"
+    gpu["driver"] = "531.14"
     assert cr._cuda_candidate(gpu, "win32")
     gpu["source"] = "windows_cim"
     assert not cr._cuda_candidate(gpu, "win32")

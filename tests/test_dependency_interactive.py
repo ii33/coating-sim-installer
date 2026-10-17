@@ -81,7 +81,7 @@ def test_late_cancellation_never_creates_next_step_or_reports_success(flow, canc
             return {"status": "success"}
 
         calls["execute_launch_entries"].side_effect = launch
-    answers = iter(["", "", "", "", "", "y"])
+    answers = iter(["", "", "", "", "y"])
     result = subject.run_interactive(root, input_fn=lambda prompt: next(answers),
                                      output=lambda text: None, cancel_event=cancel)
     assert result == 130
@@ -92,7 +92,7 @@ def test_late_cancellation_never_creates_next_step_or_reports_success(flow, canc
 
 def test_default_cnb_full_runtime_one_install_confirmation(flow):
     root, calls, run = flow
-    assert run(["", "", "", "", "", "y"]) == 0
+    assert run(["", "", "", "", "y"]) == 0
     plan = calls["plan_project_deployment"].call_args
     assert plan.args == (str(root / "app"),)
     assert plan.kwargs["source"] == "cnb"
@@ -125,7 +125,7 @@ def test_second_compute_probe_cancellation_stops_before_launch(flow, cancel_kind
         return {"status": "cancelled"}
 
     calls["recommend_environment"].side_effect = recommend
-    answers = iter(["", "", "", "", "", "y"])
+    answers = iter(["", "", "", "", "y"])
     messages = []
     result = subject.run_interactive(
         root, input_fn=lambda prompt: next(answers), output=messages.append,
@@ -142,7 +142,7 @@ def test_gui_review_includes_launch_intent_without_changing_executed_plan(flow):
     root, calls, _ = flow
     backend_plan = calls["plan_project_deployment"].return_value
     reviews = []
-    answers = iter(["", "", "", "", "", "y"])
+    answers = iter(["", "", "", "", "y"])
     assert subject.run_interactive(root, input_fn=lambda prompt: next(answers),
                                    output=lambda text: None, plan_fn=reviews.append) == 0
     review = next(row for row in reviews if row.get("operation") == "installation_review")
@@ -158,7 +158,7 @@ def test_gui_review_includes_launch_intent_without_changing_executed_plan(flow):
 
 def test_github_acceleration_and_development_are_independent(flow):
     root, calls, run = flow
-    assert run(["", "2", "y", "y", "", "y"]) == 0
+    assert run(["", "2", "y", "y", "y"]) == 0
     plan = calls["plan_project_deployment"].call_args.kwargs
     assert (plan["source"], plan["repository_url"], plan["mirror"], plan["profile"]) == (
         "github",
@@ -174,7 +174,7 @@ def test_python_first_preserves_runtime_and_clones_only_new_app(flow):
     runtime.mkdir(parents=True)
     sentinel = runtime / "preserve"
     sentinel.write_text("owned runtime")
-    assert run(["", "", "", "", "", "y"]) == 0
+    assert run(["", "", "", "", "y"]) == 0
     assert sentinel.read_text(encoding="utf-8") == "owned runtime"
     assert calls["plan_project_deployment"].call_args.args[0] == str(root / "app")
 
@@ -183,7 +183,7 @@ def test_python_first_preserves_runtime_and_clones_only_new_app(flow):
 def test_existing_project_installs_dependencies_without_source_overwrite(flow, at_root):
     root, calls, run = flow
     make_project(root if at_root else root / "app")
-    assert run(["", "", "", "", "", "y"]) == 0
+    assert run(["", "", "", "", "y"]) == 0
     calls["plan_project_deployment"].assert_not_called()
     calls["execute_plan"].assert_called_once()
 
@@ -210,6 +210,7 @@ def test_network_failure_never_executes_plan(flow):
 
 def test_python_install_confirmation_and_project_boundary(flow):
     root, calls, run = flow
+    calls["discover_python"].side_effect = [{"status": "missing", "selected_python": None}, calls["discover_python"].return_value]
     assert run(["", "", "", "", "y", "y"]) == 0
     assert calls["plan_runtime"].call_args.kwargs["project"] == root
     calls["execute_runtime"].assert_called_once()
@@ -218,7 +219,7 @@ def test_python_install_confirmation_and_project_boundary(flow):
 def test_no_git_installs_only_after_explicit_tool_plan_confirmation(flow):
     root, calls, run = flow
     calls["discover_git"].return_value = None
-    assert run(["", "", "", "", "", "y", "y"]) == 0
+    assert run(["", "", "", "", "y", "y"]) == 0
     assert calls["plan_git_runtime"].call_args.kwargs["project"] == root
     calls["execute_git_runtime"].assert_called_once()
 
@@ -259,14 +260,14 @@ def test_ctrl_c_during_execution_sets_core_cancellation_event(flow):
         return {"status": "cancelled"}
 
     calls["execute_project_deployment"].side_effect = cancelled
-    assert run(["", "", "", "", "", "y"]) == 130
+    assert run(["", "", "", "", "y"]) == 130
     assert signal.getsignal(signal.SIGINT) == previous
 
 
 def test_empty_existing_install_root_is_valid(flow):
     root, calls, run = flow
     root.mkdir()
-    assert run(["", "", "", "", "", "y"]) == 0
+    assert run(["", "", "", "", "y"]) == 0
     assert calls["plan_project_deployment"].call_args.args[0] == str(root / "app")
 
 
@@ -291,14 +292,14 @@ def test_launch_script_creation_is_included_and_existing_files_are_preserved(flo
         "status": "blocked",
         "errors": ["existing script preserved"],
     }
-    assert run(["", "", "", "", "", "y"]) == 0
+    assert run(["", "", "", "", "y"]) == 0
     calls["execute_launch_entries"].assert_not_called()
     calls["plan_launch_entries"].assert_called_once_with(root / "app", name="launch-coating")
 
 
 def test_human_output_is_concise_and_json_details_are_project_local(flow):
     root, calls, run = flow
-    answers = iter(["", "", "", "", "", "y"])
+    answers = iter(["", "", "", "", "y"])
     lines: list[str] = []
     assert (
         subject.run_interactive(root, input_fn=lambda prompt: next(answers), output=lines.append)
@@ -321,7 +322,7 @@ def test_post_install_verifies_actual_target_and_does_not_reinstall_on_gpu_failu
         {"status": "success", "selected_backend": "cuda12"},
         {"status": "success", "selected_backend": "cuda12", "backend_usable": {"cuda12": False}},
     ]
-    assert run(["", "", "", "", "", "y"]) == 0
+    assert run(["", "", "", "", "y"]) == 0
     assert calls["recommend_environment"].call_args.args == (actual,)
     assert calls["recommend_environment"].call_args.kwargs["manual_backend"] == "cuda12"
     calls["execute_project_deployment"].assert_called_once()
@@ -339,7 +340,7 @@ def test_real_windows_git_plan_source_string_is_displayed_without_crashing(flow,
     assert isinstance(plan["source"], str)
     calls["discover_git"].return_value = None
     calls["plan_git_runtime"].return_value = plan
-    answers = iter(["", "", "", "", "", "y" if approve_git else "", "y"])
+    answers = iter(["", "", "", "", "y" if approve_git else "", "y"])
     lines: list[str] = []
     code = subject.run_interactive(root, input_fn=lambda prompt: next(answers), output=lines.append)
     assert code == (0 if approve_git else 130)
@@ -358,7 +359,7 @@ def test_project_source_mapping_still_displays_commit(flow):
     root, calls, run = flow
     source = {"url": subject.CNB_URL, "commit": "a" * 40}
     calls["plan_project_deployment"].return_value = {"status": "ready", "source": source}
-    answers = iter(["", "", "", "", "", "y"])
+    answers = iter(["", "", "", "", "y"])
     lines: list[str] = []
     assert (
         subject.run_interactive(root, input_fn=lambda prompt: next(answers), output=lines.append)

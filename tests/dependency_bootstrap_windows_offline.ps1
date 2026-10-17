@@ -183,7 +183,7 @@ try {
         param($Artifact, [string]$Destination, $Proxy)
         if ($script:DownloadFailure) { Stop-CoatBootstrap "Synthetic download failed" }
         [IO.File]::WriteAllText($Destination, "synthetic verified download, never executed")
-        if ($script:RegisterDuringDownload) { $script:Registrations = @(@{ Tag = "3.13-32"; Executable = "" }) }
+        if ($script:RegisterDuringDownload) { $script:Registrations = @(@{ Tag = "3.12-32"; Executable = "" }) }
     }
     function Invoke-CoatProcess {
         param([string]$Executable, [string[]]$Arguments, [int]$TimeoutSeconds = 20,
@@ -220,7 +220,7 @@ try {
         Assert-CoatTest (Test-Path -LiteralPath (Join-Path $target "python.exe")) "installed identity retained"
         Assert-CoatTest (-not (Test-Path -LiteralPath (Join-Path $fixture "runtime-install.lock"))) "owned lock released"
         Assert-CoatThrows { Assert-CoatInstallTarget $target $fixture $manifest.version } "already exists"
-        $script:Registrations = @(@{ Tag = "3.13-arm64"; Executable = "" })
+        $script:Registrations = @(@{ Tag = "3.12-arm64"; Executable = "" })
         Assert-CoatThrows { Assert-CoatInstallTarget (Join-Path $fixture "new-target") $fixture $manifest.version } "already registered"
         $script:Registrations = @()
         $script:OfflineStage = "registration_race"

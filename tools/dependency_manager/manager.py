@@ -31,12 +31,13 @@ GROUPS = {
     "test": "开发与测试",
     "sandbox": "Sandbox 精确版本",
     "desktop": "完整桌面运行依赖",
+    "directml": "Windows DirectML 默认依赖",
 }
 PROFILES = {
     "runtime": "运行时 / 分发",
     "development": "开发（运行时 + 测试 + 静态检查）",
 }
-BACKENDS = ("cpu", "cuda12", "directml", "rocm", "xpu")
+BACKENDS = ("cpu", "cuda12", "cuda13", "directml", "rocm", "xpu")
 _ASSIGN = {
     "numpy": "cpu",
     "scipy": "cpu",
@@ -140,6 +141,8 @@ def catalog(root, groups=("desktop",), backend="cpu", profile="runtime"):
     expanded = set(groups)
     if "desktop" in expanded:
         expanded.update(("cpu", "gui", "assistant", "interchange"))
+        if sys.platform == "win32":
+            expanded.add("directml")
     if expanded.intersection(("gui", "assistant", "interchange", "appearance", "test")):
         expanded.add("cpu")
     rows = []
@@ -167,19 +170,17 @@ def catalog(root, groups=("desktop",), backend="cpu", profile="runtime"):
         for row in _read_requirements(root / "requirements-sandbox.txt"):
             row["group"] = "sandbox"
             rows.append(row)
-    if backend in ("cuda12", "directml"):
-        requirement = (
-            "cupy-cuda12x>=13,<14" if backend == "cuda12" else "torch-directml"
-        )
-        rows.append(
-            {
-                "name": normalized(requirement.split(">=")[0]),
-                "requirement": requirement,
-                "source": "optional-backend-catalog",
-                "specifier": ">=13,<14" if backend == "cuda12" else "",
-                "group": "gpu",
-            }
-        )
+    optional = []
+    if backend in ("cuda12", "cuda13"):
+        from .cuda_policy import requirements
+        optional.extend(requirements(backend))
+    if "directml" in expanded or backend == "directml":
+        optional.append("torch-directml==0.2.5.dev240914")
+    for requirement in optional:
+        match = _REQ.fullmatch(requirement)
+        rows.append({"name": normalized(match[1]), "requirement": requirement,
+                     "source": "optional-backend-catalog", "specifier": match[3] or "",
+                     "group": "gpu"})
     dedup: dict[str, dict[str, Any]] = {}
     for row in rows:
         previous = dedup.get(row["name"])
@@ -260,7 +261,7 @@ def clean_environment(proxy=None):
 
 def probe_python(path, rows=(), *, timeout=20, allow_unsupported=False):
     result = external_run(
-        [str(path), "-I", "-c", _PROBE],
+        [str(path), "-I", "-B", "-c", _PROBE],
         input=json.dumps(list(rows)),
         text=True,
         capture_output=True,
@@ -319,7 +320,7 @@ def _directml_diagnostic(target, identity=None):
         "Creation Python only creates a new venv; it never changes the Python version of an existing venv.",
         "Preserve the existing environment. For dependency plan/install/repair, explicitly select a compatible creation Python and a new unused target such as .venv-directml.",
         "For project deployment, choose a new deployment directory and a compatible creation Python; deployment always uses that checkout's .venv.",
-        "The managed Python 3.13 runtime cannot supply this DirectML profile; no automatic downgrade is performed.",
+        "The managed application runtime defaults to Python 3.12; no in-place Python downgrade is performed.",
     ]
     return {
         "backend": "directml", "reason": reason, "identity_source": source,
@@ -416,13 +417,15 @@ def inspect_environment(
         warnings.append(
             "Target venv does not exist; creation requires a compatible normal CPython"
         )
+    dml_required = any(row["name"] == "torch-directml" for row in rows)
     target_python = target["python"] or "unknown"
     unsupported = ""
-    if backend == "directml" and (
+    if dml_required and (target["exists"] or backend == "directml") and (
         target["platform"] != "win32" or not re.match(r"3\.1[0-2]\.", target_python)
+        or target["machine"].lower() not in ("amd64", "x86_64")
     ):
         unsupported = _directml_error(_directml_diagnostic(target))
-    elif backend == "cuda12" and (
+    elif backend in ("cuda12", "cuda13") and (
         target["platform"] not in ("linux", "win32")
         or target["machine"].lower() not in ("amd64", "x86_64")
     ):
@@ -432,6 +435,12 @@ def inspect_environment(
     if unsupported:
         errors.append(unsupported)
     inventory = data.get("inventory", {})
+    if dml_required and inventory.get("torch") not in (None, "2.4.1"):
+        errors.append("DirectML pins torch==2.4.1; preserve the existing Torch environment. Use a new desktop installation directory and keep modern CUDA Torch in a separate environment.")
+    if backend in ("cuda12", "cuda13"):
+        opposite = "cupy-cuda13x" if backend == "cuda12" else "cupy-cuda12x"
+        if any(name in inventory for name in (opposite, "cupy", "cupy-cuda11x")):
+            errors.append("Conflicting CuPy distribution already exists; preserve this environment and choose a fresh installation directory.")
     checks = data.get("checks", {})
     for row in rows:
         version = inventory.get(row["name"])
@@ -456,7 +465,7 @@ def inspect_environment(
     return {
         "schema_version": 1,
         "operation": "inspect",
-        "backend_diagnostic": _directml_diagnostic(target) if backend == "directml" and unsupported else None,
+        "backend_diagnostic": _directml_diagnostic(target) if dml_required and unsupported else None,
         "status": "failed" if errors else "success",
         "root": str(root),
         "target": target,
@@ -495,9 +504,11 @@ def plan_environment(
         bootstrap_python=str(python or ""),
     )
     target = result["target"]
+    dml_required = any(row["name"] == "torch-directml" for row in result["packages"])
+    discovery_backend = "directml" if dml_required else backend
     if not target["exists"] and not python:
         from .python_discovery import discover_python
-        python = discover_python(backend, project=root)["selected_python"]
+        python = discover_python(discovery_backend, project=root, preferred_minor="3.12")["selected_python"]
         result["bootstrap_python"] = str(python or "")
     if not target["exists"] and python:
         # The selected bootstrap establishes the prospective target identity.
@@ -505,9 +516,10 @@ def plan_environment(
         try:
             prospective = probe_python(python, allow_unsupported=True)
             if (
-                backend == "directml"
-                and prospective["platform"] == "win32"
-                and re.match(r"3\.1[0-2]\.", prospective["python"])
+                dml_required
+                and prospective.get("platform") == "win32"
+                and re.match(r"3\.1[0-2]\.", prospective.get("python", ""))
+                and prospective.get("machine", "").lower() in ("amd64", "x86_64")
             ):
                 result["errors"] = [
                     error
@@ -518,15 +530,18 @@ def plan_environment(
                 for row in result["packages"]:
                     if row["group"] == "gpu":
                         row["status"] = "missing"
-            elif backend == "directml":
+            elif dml_required:
                 result["backend_diagnostic"] = _directml_diagnostic(target, prospective)
                 result["errors"] = [
                     _directml_error(result["backend_diagnostic"])
                     if error.startswith("DirectML requires") else error
                     for error in result["errors"]
                 ]
+                if not any(error.startswith("DirectML requires") for error in result["errors"]):
+                    result["errors"].append(_directml_error(result["backend_diagnostic"]))
         except (ValueError, OSError, subprocess.SubprocessError) as exc:
-            if backend == "directml":
+            if dml_required:
+                result["backend_diagnostic"] = result.get("backend_diagnostic") or _directml_diagnostic(target)
                 result["backend_diagnostic"]["identity_source"] = "creation_python"
                 result["backend_diagnostic"]["interpreter"] = str(python)
                 result["backend_diagnostic"]["probe_error"] = redact(str(exc))
@@ -538,6 +553,12 @@ def plan_environment(
         else:
             try:
                 bootstrap = probe_python(python)
+                if dml_required and not (
+                    bootstrap.get("platform") == "win32"
+                    and re.match(r"3\.1[0-2]\.", bootstrap.get("python", ""))
+                    and str(bootstrap.get("machine", "")).lower() in ("amd64", "x86_64")
+                ):
+                    raise ValueError(_directml_error(_directml_diagnostic(target, bootstrap)))
                 if not bootstrap["has_venv"] or not bootstrap["has_ensurepip"]:
                     raise ValueError(
                         "Chosen Python lacks venv/ensurepip; frozen/embeddable runtimes cannot bootstrap"
@@ -589,6 +610,13 @@ def plan_environment(
             )
         else:
             result["errors"].append("Target pip is missing; select repair")
+    if backend in ("cuda12", "cuda13"):
+        from .compute_recommendation import _visible_gpus
+        from .cuda_policy import candidates
+        identity = target if target["exists"] else result.get("bootstrap_identity", {})
+        allowed, reason = candidates(_visible_gpus(sys.platform)[0], identity)
+        if identity.get("platform") != sys.platform or backend not in allowed:
+            result["errors"].append("Requested " + backend + " is not a reviewed hardware/driver combination: " + reason)
     selected = [
         row["requirement"]
         for row in result["packages"]
@@ -939,6 +967,13 @@ def execute_plan(plan, confirmed=False, emit=None, cancel_event=None, proxy=None
                 "Post-install inspection still has missing/conflicting requirements"
             )
         result["errors"].extend(inspected["errors"])
+        if result["status"] == "success" and (plan["backend"].startswith("cuda") or any(r["name"] == "torch-directml" for r in inspected["packages"])):
+            from .compute_recommendation import verify_installed_backends
+            result["compute_validation"] = verify_installed_backends(
+                inspected["target"]["interpreter"], plan["backend"],
+                any(r["name"] == "torch-directml" for r in inspected["packages"]), cancel_event)
+            if result["compute_validation"]["status"] == "cancelled":
+                result["status"] = "cancelled"
         return result
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         result["errors"].append(redact(str(exc), proxy))

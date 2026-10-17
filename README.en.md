@@ -1,5 +1,10 @@
 # Coating Sim Installer
 
+Unreleased source candidate: Windows default DirectML, Python3.12 application
+preparation and hardware-aware CUDA12/13 dependency selection. See the
+[policy, verification boundaries and official sources](docs/hardware-cuda-selection.md).
+The published alpha.1 executable does not contain these candidate changes.
+
 [中文](README.md) · [Windows x64 releases](https://github.com/ii33/coating-sim-installer/releases)
 
 A standalone Tk online installer for the public [ii33/coating-sim](https://github.com/ii33/coating-sim) project. This repository contains installer code and public resources only, not the simulation application or its datasets.

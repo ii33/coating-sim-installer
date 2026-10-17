@@ -68,22 +68,23 @@ def _incompatibility(identity, backend):
         return "Bundled pip is too old for wheel dry-run"
     if identity.get("prefix") != identity.get("base_prefix"):
         return "Select a normal base CPython, not an existing project venv"
-    if backend == "directml" and (identity.get("platform") != "win32" or not re.match(r"3\.1[0-2]\.", identity.get("python", ""))):
+    if backend == "directml" and (identity.get("platform") != "win32" or not re.match(r"3\.1[0-2]\.", identity.get("python", ""))
+                                  or identity.get("machine", "").lower() not in ("amd64", "x86_64")):
         return "DirectML requires Windows CPython 3.10–3.12"
-    if backend == "cuda12" and (identity.get("platform") not in ("win32", "linux") or identity.get("machine", "").lower() not in ("amd64", "x86_64")):
+    if backend in ("cuda12", "cuda13") and (identity.get("platform") not in ("win32", "linux") or identity.get("machine", "").lower() not in ("amd64", "x86_64")):
         return "CUDA12 profile requires Windows/Linux x86-64"
     if backend in ("rocm", "xpu"):
         return "This backend requires an explicitly managed vendor environment"
     return ""
 
 
-def discover_python(backend="cpu", explicit=None, *, project=None, cancel_event=None):
+def discover_python(backend="cpu", explicit=None, *, project=None, cancel_event=None, preferred_minor=None):
     """Never mutate or install; a supplied explicit choice prohibits fallback.
 
     Call from a GUI worker: at most 12 interpreter probes (2 seconds each), plus
     a 2-second Windows launcher listing. Paths are deduplicated before probing.
     """
-    if backend not in ("cpu", "cuda12", "directml", "rocm", "xpu"):
+    if backend not in ("cpu", "cuda12", "cuda13", "directml", "rocm", "xpu"):
         raise ValueError("Unknown backend")
     candidates, seen = [], set()
     def cancelled():
@@ -119,6 +120,9 @@ def discover_python(backend="cpu", explicit=None, *, project=None, cancel_event=
             break
     if cancelled():
         return {"status": "cancelled", "selected_python": None, "candidates": candidates, "errors": []}
-    selected = next((row["path"] for row in candidates if row["compatible"]), None)
+    compatible = [row for row in candidates if row["compatible"]]
+    if preferred_minor and not explicit:
+        compatible.sort(key=lambda row: not str((row.get("identity") or {}).get("python", "")).startswith(preferred_minor + "."))
+    selected = next((row["path"] for row in compatible), None)
     return {"status": "ready" if selected else "missing", "selected_python": selected,
             "candidates": candidates, "errors": [] if selected else ["No compatible creation Python found; explicitly obtain a supported runtime or select its interpreter."]}

@@ -1,0 +1,24 @@
+{
+  "version": "3.12.10",
+  "source": "https://www.python.org/downloads/release/python-31210/",
+  "verification": "SHA256 from official python.org Sigstore messageDigest over HTTPS; no claim of separate signature-chain verification",
+  "x64_readback_sha256": "67b5635e80ea51072b87941312d00ec8927c4db9ba18938f7ad2d27b328b95fb",
+  "artifacts": {
+    "x86_64": {
+      "url": "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe",
+      "sha256": "67b5635e80ea51072b87941312d00ec8927c4db9ba18938f7ad2d27b328b95fb",
+      "digest_document": "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe.sigstore"
+    },
+    "x86": {
+      "url": "https://www.python.org/ftp/python/3.12.10/python-3.12.10.exe",
+      "sha256": "fdfe385b94f5b8785a0226a886979527fd26eb65defdbf29992fd22cc4b0e31e",
+      "digest_document": "https://www.python.org/ftp/python/3.12.10/python-3.12.10.exe.sigstore"
+    },
+    "arm64": {
+      "url": "https://www.python.org/ftp/python/3.12.10/python-3.12.10-arm64.exe",
+      "sha256": "377ac8fd478987940088e879441e702a71b53164d2a1e6f1d51ff77a7e470258",
+      "digest_document": "https://www.python.org/ftp/python/3.12.10/python-3.12.10-arm64.exe.sigstore"
+    }
+  },
+  "note": "Managed application interpreter only; frozen installer build/runtime is independent. This is the last conventional Windows full installer, not the latest 3.12 security patch."
+}
