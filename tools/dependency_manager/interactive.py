@@ -233,7 +233,7 @@ def run_interactive(
         else:
             git = discover_git(project=root)
             if not git:
-                git_plan = plan_git_runtime(proxy=proxy, project=root)
+                git_plan = plan_git_runtime(proxy=proxy, project=root, runtime_mirror=mirror != "pypi")
                 if not ready(git_plan):
                     return 2
                 if not yes("缺少 Git；确认上述校验计划，在安装目录内安装官方私有 Git？", "git"):

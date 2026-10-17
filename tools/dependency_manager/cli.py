@@ -385,7 +385,7 @@ def main(argv=None):
         elif args.operation in ("git-plan", "git-install"):
             from .git_runtime import execute_git_runtime, plan_git_runtime
 
-            plan = plan_git_runtime(args.git_dir, proxy, project=args.project)
+            plan = plan_git_runtime(args.git_dir, proxy, project=args.project, runtime_mirror=resolve_mirror(args.project, args.mirror) != "pypi")
             result = (
                 plan
                 if args.operation == "git-plan"

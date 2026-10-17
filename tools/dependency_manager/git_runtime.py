@@ -40,6 +40,12 @@ def git_runtime_manifest():
             or not p.path.startswith("/git-for-windows/git/releases/download/")
         ):
             raise ValueError("Git must come from the fixed official HTTPS source")
+        expected_mirror = artifact["url"].replace(
+            "https://github.com/git-for-windows/git/releases/download/",
+            "https://mirrors.huaweicloud.com/git-for-windows/",
+        )
+        if artifact.get("mirror_url") != expected_mirror:
+            raise ValueError("Git mirror must match the fixed official artifact")
         if not re.fullmatch(r"[0-9a-f]{64}", artifact["sha256"]):
             raise ValueError("Invalid pinned Git SHA-256")
     return data
@@ -95,7 +101,7 @@ def _plan_id(plan):
     ).hexdigest()
 
 
-def plan_git_runtime(directory=None, proxy=None, *, platform_name=None, machine=None, project=None):
+def plan_git_runtime(directory=None, proxy=None, *, platform_name=None, machine=None, project=None, runtime_mirror=True):
     manifest = git_runtime_manifest()
     proxy = proxy or ProxyConfig()
     proxy.validate()
@@ -121,6 +127,9 @@ def plan_git_runtime(directory=None, proxy=None, *, platform_name=None, machine=
         errors.append("Git destination already exists; no overwrite")
     if not contained_runtime_path(directory, boundary):
         errors.append("Git destination must be an unlinked local path inside the selected project (or user home for an explicit legacy path)")
+    artifact = dict(manifest["artifacts"].get(architecture, {}))
+    if not runtime_mirror:
+        artifact.pop("mirror_url", None)
     plan = {
         "schema_version": 1,
         "operation": "git_runtime_plan",
@@ -131,7 +140,8 @@ def plan_git_runtime(directory=None, proxy=None, *, platform_name=None, machine=
         "platform": platform_name or sys.platform,
         "architecture": architecture,
         "version": manifest["version"],
-        "artifact": manifest["artifacts"].get(architecture),
+        "artifact": artifact or None,
+        "runtime_mirror": bool(runtime_mirror),
         "source": manifest["source"],
         "license": manifest["license"],
         "signature_evidence": manifest["signature_evidence"],
@@ -148,6 +158,9 @@ def plan_git_runtime(directory=None, proxy=None, *, platform_name=None, machine=
 
 
 def _official_url(url):
+    # Only the exact pinned mirror artifacts, never arbitrary mirror paths.
+    if url in {a["mirror_url"] for a in git_runtime_manifest()["artifacts"].values()}:
+        return
     p = urlsplit(url)
     if (
         p.scheme != "https"
@@ -157,7 +170,7 @@ def _official_url(url):
         or p.port not in (None, 443)
         or p.fragment
     ):
-        raise ValueError("Git download redirect outside official HTTPS hosts")
+        raise ValueError("Git download redirect outside approved HTTPS sources")
 
 
 class _OfficialRedirect(HTTPRedirectHandler):
@@ -166,7 +179,10 @@ class _OfficialRedirect(HTTPRedirectHandler):
         return super().redirect_request(request, fp, code, msg, headers, newurl)
 
 
-def download_git(artifact, destination, proxy, cancel_event, emit, *, max_bytes=MAX_DOWNLOAD):
+def _download_git_once(artifact, destination, proxy, cancel_event, emit, *, max_bytes=MAX_DOWNLOAD):
+    _official_url(artifact["url"])
+    if cancel_event.is_set():
+        raise InterruptedError("Git download cancelled")
     proxies = _effective_proxy_map(proxy)
     opener = build_opener(_UniformProxyHandler(proxies), HTTPSHandler(), _OfficialRedirect())
     digest, total, start = hashlib.sha256(), 0, time.monotonic()
@@ -199,6 +215,38 @@ def download_git(artifact, destination, proxy, cancel_event, emit, *, max_bytes=
         if created:
             Path(destination).unlink(missing_ok=True)
         raise
+
+
+def download_git(artifact, destination, proxy, cancel_event, emit, *, max_bytes=MAX_DOWNLOAD):
+    """Mirror first, official fallback; both must match the official pinned hash."""
+    if Path(destination).exists():
+        raise FileExistsError("Git download destination already exists")
+    sources = [artifact["url"]]
+    if artifact.get("mirror_url"):
+        expected = artifact["url"].replace(
+            "https://github.com/git-for-windows/git/releases/download/",
+            "https://mirrors.huaweicloud.com/git-for-windows/",
+        )
+        if artifact["mirror_url"] != expected:
+            raise ValueError("Git mirror differs from the pinned official artifact")
+        sources.insert(0, artifact["mirror_url"])
+    for index, url in enumerate(sources):
+        if cancel_event.is_set():
+            raise InterruptedError("Git download cancelled")
+        emit({"event": "progress", "phase": "git_download", "source": url})
+        try:
+            return _download_git_once(
+                dict(artifact, url=url), destination, proxy, cancel_event, emit,
+                max_bytes=max_bytes,
+            )
+        except InterruptedError:
+            raise
+        except (OSError, ValueError):
+            if cancel_event.is_set():
+                raise InterruptedError("Git download cancelled") from None
+            if index == len(sources) - 1:
+                raise
+            emit({"event": "progress", "phase": "git_download", "fallback": "official"})
 
 
 def _extract_zip(archive, destination, cancel_event, *, max_bytes=MAX_EXPANDED):
@@ -282,12 +330,16 @@ def execute_git_runtime(plan, confirmed=False, emit=None, cancel_event=None, pro
             raise ValueError("Git runtime plan must be explicitly confirmed")
         proxy.validate()
         manifest = git_runtime_manifest()
+        expected_artifact = dict(manifest["artifacts"].get(plan.get("architecture"), {}))
+        if plan.get("runtime_mirror") is False:
+            expected_artifact.pop("mirror_url", None)
         if (
-            plan.get("plan_id") != _plan_id(plan)
+            plan.get("runtime_mirror") not in (True, False)
+            or plan.get("plan_id") != _plan_id(plan)
             or plan.get("status") != "ready"
             or plan.get("operation") != "git_runtime_plan"
             or plan.get("platform") != "win32"
-            or plan.get("artifact") != manifest["artifacts"].get(plan.get("architecture"))
+            or plan.get("artifact") != expected_artifact
             or plan.get("version") != manifest["version"]
             or plan.get("proxy") != proxy.public()
         ):

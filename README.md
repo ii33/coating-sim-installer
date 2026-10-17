@@ -38,3 +38,5 @@ python -m PyInstaller --noconfirm --clean installer.spec
 `--self-check` 和 `--smoke-gui` 为不安装的原生诊断。运行时和包安装均需联网；项目数据、下载临时目录和日志留在所选目录内，诊断输出必须在 EXE 临时解包目录之外。alpha.1 文件保留，不会被 alpha.2 原地覆盖。
 
 [部署与排障](docs/dependency-manager-bootstrap.md) · [下载策略](docs/private-python-runtime.md) · [许可](LICENSE)
+
+MinGit binary downloads use the Huawei Cloud mirror first when mirrors are enabled, with official GitHub fallback. Both sources must match the same pinned official SHA-256. Choosing PyPI disables this mirror too. Project source selection is unchanged.

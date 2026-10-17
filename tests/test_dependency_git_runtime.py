@@ -347,3 +347,80 @@ def test_download_does_not_delete_preexisting_file(home, fixture_manifest, monke
             lambda event: None,
         )
     assert destination.read_bytes() == b"unrelated"
+
+
+def test_git_mirror_first_and_official_fallback(home, fixture_manifest, monkeypatch):
+    artifact = git.git_runtime_manifest()["artifacts"]["x86_64"]
+    calls = []
+
+    class Opener:
+        def open(self, request, timeout):
+            calls.append(request.full_url)
+            if request.full_url == artifact["mirror_url"]:
+                raise OSError("mirror unavailable")
+            return Response(fixture_manifest)
+
+    monkeypatch.setattr(git, "build_opener", lambda *args: Opener())
+    destination = home / "fallback.zip"
+    git.download_git(artifact, destination, ProxyConfig(), threading.Event(), lambda e: None)
+    assert calls == [artifact["mirror_url"], artifact["url"]]
+    assert destination.read_bytes() == fixture_manifest
+
+
+def test_corrupt_mirror_cleared_before_official_fallback(home, fixture_manifest, monkeypatch):
+    artifact = git.git_runtime_manifest()["artifacts"]["x86_64"]
+    calls = []
+
+    class Opener:
+        def open(self, request, timeout):
+            calls.append(request.full_url)
+            return Response(b"corrupt" if len(calls) == 1 else fixture_manifest)
+
+    monkeypatch.setattr(git, "build_opener", lambda *args: Opener())
+    destination = home / "fallback.zip"
+    git.download_git(artifact, destination, ProxyConfig(), threading.Event(), lambda e: None)
+    assert calls == [artifact["mirror_url"], artifact["url"]]
+    assert destination.read_bytes() == fixture_manifest
+
+
+def test_mirror_success_skips_official(home, fixture_manifest, monkeypatch):
+    artifact = git.git_runtime_manifest()["artifacts"]["x86_64"]
+    calls = []
+
+    class Opener:
+        def open(self, request, timeout):
+            calls.append(request.full_url)
+            return Response(fixture_manifest)
+
+    monkeypatch.setattr(git, "build_opener", lambda *args: Opener())
+    git.download_git(artifact, home / "mirror.zip", ProxyConfig(), threading.Event(), lambda e: None)
+    assert calls == [artifact["mirror_url"]]
+
+
+def test_mirror_opt_out_plan_and_unapproved_redirect(home):
+    value = git.plan_git_runtime(home / "git", platform_name="win32", machine="amd64", runtime_mirror=False)
+    assert value["status"] == "ready"
+    assert value["runtime_mirror"] is False
+    assert "mirror_url" not in value["artifact"]
+    artifact = git.git_runtime_manifest()["artifacts"]["x86_64"]
+    git._official_url(artifact["mirror_url"])
+    for url in [artifact["mirror_url"] + "?untrusted=1", "https://mirrors.huaweicloud.com/other.zip"]:
+        with pytest.raises(ValueError):
+            git._official_url(url)
+
+
+def test_cancel_during_mirror_failure_does_not_fallback(home, fixture_manifest, monkeypatch):
+    artifact = git.git_runtime_manifest()["artifacts"]["x86_64"]
+    event, calls = threading.Event(), []
+
+    class Opener:
+        def open(self, request, timeout):
+            calls.append(request.full_url)
+            event.set()
+            raise OSError("cancelled transport")
+
+    monkeypatch.setattr(git, "build_opener", lambda *args: Opener())
+    with pytest.raises(InterruptedError):
+        git.download_git(artifact, home / "cancel.zip", ProxyConfig(), event, lambda e: None)
+    assert calls == [artifact["mirror_url"]]
+    assert not (home / "cancel.zip").exists()

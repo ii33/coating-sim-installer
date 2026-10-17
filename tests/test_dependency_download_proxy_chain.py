@@ -144,7 +144,7 @@ def test_external_redirect_is_blocked_before_second_connection(download, transpo
     run, url, redirect, destination = download
     calls, responses = transport
     responses.append(Response(302, "https://untrusted.example/payload"))
-    with pytest.raises(ValueError, match="official"):
+    with pytest.raises(ValueError, match="official|approved"):
         run(ProxyConfig("none"))
     assert len(calls) == 1
     assert not destination.exists()

@@ -35,3 +35,5 @@ python -m PyInstaller --noconfirm --clean installer.spec
 `--self-check` and `--smoke-gui` are offline native diagnostics. Downloads, temporary deployment files and logs stay under the selected target. Diagnostic output must remain outside the onefile extraction directory. alpha.1 release files remain intact.
 
 [Bootstrap details](docs/dependency-manager-bootstrap.md) · [Private runtime policy](docs/private-python-runtime.md) · [License](LICENSE)
+
+MinGit binary downloads use the Huawei Cloud mirror first when mirrors are enabled, with official GitHub fallback. Both sources must match the same pinned official SHA-256. Choosing PyPI disables this mirror too. Project source selection is unchanged.
