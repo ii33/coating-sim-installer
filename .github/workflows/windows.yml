@@ -27,7 +27,7 @@ jobs:
         shell: pwsh
         run: |
           $report = Join-Path $env:RUNNER_TEMP 'installer-self-check.json'
-          $exe = (Resolve-Path 'dist/CoatingSimInstaller-v0.1.0-alpha.9-windows-x64.exe').Path
+          $exe = (Resolve-Path 'dist/CoatingSimInstaller-v0.1.0-alpha.10-windows-x64.exe').Path
           $p = Start-Process $exe -ArgumentList @('--self-check','--self-check-output', $report) -PassThru -Wait
           if ($p.ExitCode -ne 0) { throw 'Executable self-check failed' }
           $result = Get-Content $report -Raw | ConvertFrom-Json

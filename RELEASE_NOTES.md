@@ -1,3 +1,9 @@
+## v0.1.0-alpha.10
+
+The Windows GUI installer now starts Python, pip, Git and cleanup subprocesses without opening console windows. Exit codes and diagnostic output remain visible in the installer. The default installation target is the EXE's own directory (the entry script's directory when running from source); an explicit target or GUI selection takes precedence.
+
+Offline Windows validation covered the full test suite, frozen self-check, GUI startup, and a no-pip virtual environment diagnostic. The EXE remains an unsigned prerelease; verify its SHA256SUMS.txt before use.
+
 ## v0.1.0-alpha.9
 
 Windows x64 onefile installer update. Desktop shortcut failure now leaves a completed install or verified project update intact, shows the specific warning, and offers a shortcut-only retry. Windows install entry and Shell Link creation no longer depend on PowerShell; the shortcut uses native Windows APIs.

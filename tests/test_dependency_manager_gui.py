@@ -15,6 +15,19 @@ from tools.dependency_manager.updates import validated_release_page
 tk = gui.tk
 
 
+def test_directory_entry_and_browse_keep_manual_selection(window, monkeypatch, tmp_path):
+    app = gui.DependencyManagerWindow(window, tmp_path / "initial")
+    typed = tmp_path / "中文 空格 手动输入"
+    app.directory.set(str(typed))
+    monkeypatch.setattr(gui.filedialog, "askdirectory", lambda **kwargs: "")
+    app.choose_directory()
+    assert app.directory.get() == str(typed)
+    browsed = tmp_path / "中文 空格 浏览选择"
+    monkeypatch.setattr(gui.filedialog, "askdirectory", lambda **kwargs: str(browsed))
+    app.choose_directory()
+    assert app.directory.get() == str(browsed)
+
+
 def test_update_action_is_read_only_and_page_requires_click(window, monkeypatch, tmp_path):
     tag = "v0.2.0"
     page = validated_release_page(tag)

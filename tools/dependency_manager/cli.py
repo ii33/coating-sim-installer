@@ -32,15 +32,12 @@ def discover_project():
     if getattr(sys, "frozen", False):
         from .app_info import default_installation_directory
         return default_installation_directory()
-    starting = (
-        Path(sys.executable).parent
-        if getattr(sys, "frozen", False)
-        else Path(__file__).resolve().parents[2]
-    )
+    starting = Path(__file__).resolve().parents[2]
     for path in (starting, *starting.parents):
         if (path / "requirements.txt").is_file() and (path / "coat_sim").is_dir():
             return path
-    return Path.cwd()
+    from .app_info import default_installation_directory
+    return default_installation_directory()
 
 
 def parser():

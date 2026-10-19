@@ -21,7 +21,7 @@ def self_check():
     result = {"operation": "installer_self_check", "version": VERSION,
               "frozen": bool(getattr(sys, "frozen", False)), "status": "failed",
               "python": platform.python_version(), "architecture_bits": struct.calcsize("P") * 8,
-              "default_project": str(default_installation_directory()), "tls": ssl.OPENSSL_VERSION,
+              "default_project": str(default_installation_directory(__file__)), "tls": ssl.OPENSSL_VERSION,
               "installer_executed": False, "network_used": False, "project_python": "project-private CPython 3.12.10 from official NuGet; never this frozen EXE"}
     root = None
     try:
@@ -33,7 +33,7 @@ def self_check():
         result["runtime_manifest"] = runtime_manifest()["version"]
         result["git_manifest"] = git_runtime_manifest()["version"]
         result["icon_sha256"] = hashlib.sha256(icon_path().read_bytes()).hexdigest()
-        result["default_target_allowed"] = unlinked_local_path(default_installation_directory())
+        result["default_target_allowed"] = unlinked_local_path(default_installation_directory(__file__))
         if not result["default_target_allowed"]:
             raise ValueError("Default installation target is not a safe writable-data location")
         if getattr(sys, "frozen", False):
@@ -106,7 +106,7 @@ def main(argv=None):
         write_report(args.self_check_output, result)
         return 0 if result["status"] == "success" else 2
     from tools.dependency_manager.gui import DependencyManagerWindow, tk
-    project = args.project or default_installation_directory()
+    project = args.project if args.project is not None else default_installation_directory(__file__)
     if not unlinked_local_path(project):
         raise ValueError("Choose a normal project directory outside the onefile extraction")
     root = tk.Tk()

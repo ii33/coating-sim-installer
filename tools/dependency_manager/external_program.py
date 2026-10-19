@@ -54,10 +54,21 @@ def clean_frozen_environment(env):
 
 
 def run(*args, **kwargs):
+    kwargs = _windowless_kwargs(kwargs)
     with external_program_context():
         return subprocess.run(*args, **kwargs)
 
 
 def popen(*args, **kwargs):
+    kwargs = _windowless_kwargs(kwargs)
     with external_program_context():
         return subprocess.Popen(*args, **kwargs)
+
+
+def _windowless_kwargs(kwargs):
+    """Suppress child console windows; retain streams and process group flags."""
+    if os.name != "nt":
+        return kwargs
+    options = kwargs.copy()
+    options["creationflags"] = options.get("creationflags", 0) | subprocess.CREATE_NO_WINDOW
+    return options
