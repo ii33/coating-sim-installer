@@ -1,3 +1,9 @@
+## v0.1.0-alpha.9
+
+Windows x64 onefile installer update. Desktop shortcut failure now leaves a completed install or verified project update intact, shows the specific warning, and offers a shortcut-only retry. Windows install entry and Shell Link creation no longer depend on PowerShell; the shortcut uses native Windows APIs.
+
+The EXE passed a frozen self-check, GUI startup and a temporary Shell Link smoke test. A real installation on the affected machine was not repeated. Unsigned prerelease; compare the downloaded EXE with SHA256SUMS.txt.
+
 首个独立在线安装器 alpha：Windows x64 单文件 EXE，自带界面运行时，无需为启动安装器预装 Python。
 
 - 保留 CNB 默认 / GitHub、PyPI 镜像加速、开发环境、启动脚本与快捷方式计划以及原 ICO。

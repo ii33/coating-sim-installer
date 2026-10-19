@@ -473,6 +473,55 @@ def test_pipeline_failure_joins_owned_worker_without_turning_failure_into_cancel
     calls["plan_project_deployment"].assert_not_called()
 
 
+def test_install_shortcut_failure_is_noncritical_success_with_warning(flow, monkeypatch):
+    # A desktop shortcut failure must not fail or undo a completed installation.
+    root, calls, _ = flow
+    monkeypatch.setattr(subject.sys, "platform", "win32")
+    calls["ensure_desktop_shortcut"].return_value = {"status": "failed", "errors": ["桌面写入被拒绝"]}
+    events, messages = [], []
+    answers = iter(["", "", "", "", "y"])
+    assert subject.run_interactive(root, input_fn=lambda p: next(answers),
+                                   output=messages.append, event_fn=events.append) == 0
+    done = next(row for row in events if row.get("event") == "completion")
+    assert done["shortcut"]["status"] == "failed"
+    assert "桌面写入被拒绝" in done["shortcut"]["errors"]
+    assert any("安装完成" in message for message in messages)
+    assert any("桌面快捷方式未完成" in message and "桌面写入被拒绝" in message for message in messages)
+    calls["execute_project_deployment"].assert_called_once()
+
+
+def test_raising_shortcut_is_noncritical_on_completed_install(flow, monkeypatch):
+    # An unexpected ordinary Exception (e.g. an injected Windows API error) from
+    # the shortcut step must not fail the completed installation; the boundary
+    # converts it into a redacted failed payload and the install still succeeds.
+    root, calls, _ = flow
+    monkeypatch.setattr(subject.sys, "platform", "win32")
+    calls["ensure_desktop_shortcut"].side_effect = OSError(
+        "desktop API failed at https://user:pass@example.invalid/desktop")
+    events, messages = [], []
+    answers = iter(["", "", "", "", "y"])
+    assert subject.run_interactive(root, input_fn=lambda prompt: next(answers),
+                                   output=messages.append, event_fn=events.append) == 0
+    done = next(row for row in events if row.get("event") == "completion")
+    assert done["shortcut"]["status"] == "failed"
+    error = "; ".join(done["shortcut"]["errors"])
+    assert "OSError" in error and "desktop API failed" in error
+    assert "example.invalid" in error and "user:pass" not in error
+    assert any("安装完成" in message for message in messages)
+    assert any("桌面快捷方式未完成" in message for message in messages)
+    calls["execute_project_deployment"].assert_called_once()
+
+
+def test_shortcut_keyboard_interrupt_is_not_converted_into_install_success(flow, monkeypatch):
+    # BaseException is not swallowed by the noncritical boundary: cancellation wins.
+    root, calls, _ = flow
+    monkeypatch.setattr(subject.sys, "platform", "win32")
+    calls["ensure_desktop_shortcut"].side_effect = KeyboardInterrupt
+    answers = iter(["", "", "", "", "y"])
+    assert subject.run_interactive(root, input_fn=lambda prompt: next(answers),
+                                   output=lambda value: None) == 130
+
+
 def test_install_completion_event_contains_verified_desktop_status(flow):
     root, calls, _ = flow
     calls["ensure_desktop_shortcut"].return_value = {"status": "success", "path": "test-desktop/link.lnk", "reused": True}

@@ -16,6 +16,7 @@ from typing import Any
 
 from .app_info import VERSION, icon_path
 from .completion_state import terminal_outcome
+from .desktop_shortcut import ensure_desktop_shortcut
 from .download_progress import DownloadProgress, byte_text
 from .interactive import project_directory, run_interactive
 from .mirrors import ProxyConfig, redact, resolve_mirror
@@ -295,6 +296,9 @@ class DependencyManagerWindow:
         self.result_actions.columnconfigure(1, weight=1)
         self.retry_button = ttk.Button(self.result_actions, text="重试", command=self.retry)
         self.retry_button.grid(row=0, column=0, sticky="w")
+        self.shortcut_button = ttk.Button(self.result_actions, text="重试桌面快捷方式",
+            command=self.retry_shortcut)
+        self.shortcut_button.grid(row=0, column=1, sticky="w", padx=(8, 0))
         self.exit_button = tk.Button(self.result_actions, text="退出安装器", command=self.close,
             font=("Microsoft YaHei UI", 14, "bold"), foreground="white", background="#1D4ED8",
             activeforeground="white", activebackground="#1E40AF", relief="flat", padx=24, pady=9)
@@ -344,12 +348,13 @@ class DependencyManagerWindow:
 
     def _render_result(self, payload):
         completion = payload.get("completion") or {}
-        needs_shortcut = sys.platform == "win32" and self.operation_name in ("install", "project-update")
+        needs_shortcut = sys.platform == "win32" and self.operation_name in ("install", "project-update", "shortcut")
         view = terminal_outcome(self.operation_name, payload["code"], completion,
             payload.get("reason", ""), requires_shortcut=needs_shortcut)
         self.terminal_state = view["state"]
         self.last_code = view["code"]
-        palette = {"success": ("#EAF7EE", "#176A2D"), "failed": ("#FDECEC", "#B42318"),
+        palette = {"success": ("#EAF7EE", "#176A2D"), "warning": ("#FFF6DB", "#8A5B00"),
+                   "failed": ("#FDECEC", "#B42318"),
                    "cancelled": ("#FFF6DB", "#8A5B00"), "unconfirmed": ("#EEF4FF", "#1E40AF")}
         background, foreground = palette[view["state"]]
         self.result_panel.configure(background=background)
@@ -379,13 +384,66 @@ class DependencyManagerWindow:
             self.retry_button.grid()
         else:
             self.retry_button.grid_remove()
+        if view.get("shortcut_retry"):
+            self.shortcut_button.grid()
+        else:
+            self.shortcut_button.grid_remove()
         self.exit_button.configure(state="disabled" if self.busy else "normal", text="退出安装器")
         self._resize()
         return view
 
     def retry(self):
-        if not self.busy:
-            self.start(self.operation_name if self.operation_name in ("install", "project-update", "python") else "install")
+        if self.busy:
+            return
+        if self.operation_name == "shortcut":
+            self.retry_shortcut()
+        elif self.operation_name in ("install", "project-update", "python"):
+            self.start(self.operation_name)
+        else:
+            self.start("install")
+
+    def retry_shortcut(self):
+        """Dedicated retry: only re-runs the noncritical desktop shortcut for the
+        same target. It never reruns installation or a source update."""
+        if self.busy or self.closing:
+            return
+        target = self.current_target
+        self._clear_result()
+        self.operation_name = "shortcut"
+        self.session = InstallerSession({})
+        session = self.session
+        self.total_phases = 1
+        self._show_progress()
+        for control in self.controls:
+            control.configure(state="disabled")
+        self.cancel_button.configure(state="disabled")
+        self.last_code = None
+        self.current_phase = "重试桌面快捷方式"
+        self.status.set("正在重试桌面快捷方式；不会重新安装或更新。")
+        self._append("重试桌面快捷方式：" + str(target))
+
+        def work():
+            try:
+                shortcut = ensure_desktop_shortcut(target)
+                if not isinstance(shortcut, dict):
+                    shortcut = {"status": "failed", "errors": ["桌面快捷方式结果无效"]}
+            except Exception as exc:  # ensure_desktop_shortcut reports failures as data
+                shortcut = {"status": "failed", "errors": [redact(str(exc), ProxyConfig("env"))]}
+            code = 0 if shortcut.get("status") == "success" else 2
+            if code == 0:
+                summary = "桌面快捷方式已就绪：" + str(shortcut.get("path", ""))
+                reason = ""
+            else:
+                summary = "桌面快捷方式仍未完成：" + "; ".join(shortcut.get("errors", []))
+                reason = "; ".join(shortcut.get("errors", [])) or summary
+            session.send("done", {"code": code,
+                "details": redact(json.dumps(shortcut, ensure_ascii=False, indent=2), ProxyConfig("env")),
+                "summary": summary,
+                "completion": {"operation": "shortcut", "target": target, "shortcut": shortcut},
+                "reason": reason})
+
+        self.worker = threading.Thread(target=work, name="coating-shortcut-retry")
+        self.worker.start()
 
     def choose_directory(self):
         selected = filedialog.askdirectory(parent=self.window, initialdir=self.directory.get())
@@ -503,6 +561,8 @@ class DependencyManagerWindow:
                                 shortcut=result.get("shortcut"), up_to_date=result.get("up_to_date"),
                                 version=result.get("current_version"))
                             summary = ("主项目已是最新源码：" if result.get("up_to_date") else "主项目更新完成：") + result.get("current_version", "")
+                            if result.get("warnings"):
+                                summary += "；" + "；".join(result["warnings"])
                         else:
                             failure_reason = "; ".join(result.get("errors", []))
                             summary = "主项目更新已取消；请查看恢复记录。" if code == 130 else "主项目更新失败：" + "; ".join(result.get("errors", []))
@@ -646,7 +706,7 @@ class DependencyManagerWindow:
         elapsed = int((self.operation_finished or time.monotonic()) - self.operation_started)
         snapshot = self.download_progress.snapshot()
         pieces = [f"已用 {elapsed // 60:02d}:{elapsed % 60:02d}"]
-        if self.terminal_state in ("success", "failed", "cancelled", "unconfirmed"):
+        if self.terminal_state in ("success", "warning", "failed", "cancelled", "unconfirmed"):
             pieces.append(self.result_title.get())
         else:
             pieces.append(f"已完成阶段 {len(self.completed_phases)}/{self.total_phases}")
@@ -773,6 +833,7 @@ class DependencyManagerWindow:
             self.result_panel.grid()
             self.result_actions.grid()
             self.retry_button.grid_remove()
+            self.shortcut_button.grid_remove()
             self.exit_button.configure(state="disabled", text="正在安全退出…")
             self.status.set("正在安全退出：等待当前步骤收尾，请勿强制终止。")
             self._resize()

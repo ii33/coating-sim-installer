@@ -7,7 +7,7 @@ from pathlib import Path
 from . import manager, private_runtime, runtime
 from . import project_deploy as deploy
 from .compute_recommendation import END_USER_GROUPS
-from .desktop_shortcut import ensure_desktop_shortcut
+from .desktop_shortcut import ensure_desktop_shortcut, shortcut_failure
 from .git_runtime import discover_git
 from .interactive import CNB_URL, project_directory
 from .mirrors import ProxyConfig, redact, resolve_mirror
@@ -155,15 +155,28 @@ def update_project(container, provider="cnb", *, mirror="tuna", backend=None, de
         if run(["rev-parse", "HEAD"]).strip() != latest or not tracked_clean():
             raise ValueError("更新后的源码身份/完整性检查失败")
         current_version = version()
-        phase("准备桌面快捷方式")
-        shortcut = ensure_desktop_shortcut(app, desktop=desktop)
-        if shortcut["status"] != "success":
-            raise ValueError("桌面快捷方式未创建：" + "; ".join(shortcut.get("errors", [])))
+        # The verified source update and its dependencies are now applied: the
+        # update is committed and a cancellation observed at or after this point
+        # must never roll it back. The desktop shortcut is a noncritical post-step,
+        # so it does not use the raising phase() gate and is skipped when a
+        # cancellation was already requested (the caller still reports the cancel).
         if cancel.is_set():
-            raise InterruptedError("更新已取消，正在恢复源码")
+            shortcut = {"status": "failed", "errors": ["更新已取消，桌面快捷方式未创建；可单独重试"]}
+        else:
+            if phase_fn:
+                phase_fn("准备桌面快捷方式")
+            log("准备桌面快捷方式")
+            try:
+                shortcut = ensure_desktop_shortcut(app, desktop=desktop)
+            except Exception as exc:  # noncritical: never roll back a verified update for a shortcut
+                shortcut = shortcut_failure(exc, proxy)
+        if shortcut.get("status") != "success":
+            shortcut_error = "; ".join(shortcut.get("errors", [])) or "未知错误"
+            result["warnings"].append("主项目已更新并保留；桌面快捷方式未完成：" + shortcut_error)
+            log("桌面快捷方式未完成（非关键；更新后的源码与依赖已保留）：" + shortcut_error)
         save_record(journal, {"state": "success", "old_commit": previous, "new_commit": latest,
             "version": current_version, "provider": provider, "shortcut": shortcut.get("path"),
-            "updated_at": time.time()}, root=app, schema=SCHEMA)
+            "shortcut_status": shortcut.get("status"), "updated_at": time.time()}, root=app, schema=SCHEMA)
         result.update(status="success", up_to_date=latest == previous, current_version=current_version,
                       current_commit=latest, shortcut=shortcut)
         log(("已是最新源码：" if latest == previous else "更新完成：") + current_version + " @ " + latest[:12])

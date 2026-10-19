@@ -127,14 +127,26 @@ def test_standalone_probe_scripts_are_valid_and_do_not_import_project_runtime():
 
 
 def test_windows_cim_malformed_is_safe(probes, monkeypatch):
-    # Undo the fixture's visibility replacement for this hardware parser test.
+    # The built-in display API is optional; a blocked device query stays safe.
     import importlib
     module = importlib.reload(cr)
-    monkeypatch.setattr(module.shutil, "which", lambda name: "powershell.exe" if name == "powershell.exe" else None)
-    monkeypatch.setattr(module, "_run", lambda *_: "invalid-json")
+    monkeypatch.setattr(module.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(module, "_windows_display_names", lambda: (_ for _ in ()).throw(OSError("blocked")))
     devices, warnings = module._visible_gpus("win32")
     assert devices == []
     assert warnings
+
+
+def test_windows_adapter_probe_uses_native_api_without_powershell(monkeypatch):
+    import importlib
+    module = importlib.reload(cr)
+    monkeypatch.setattr(module.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(module, "_windows_display_names", lambda: ["NVIDIA Test", "Intel Test"])
+    monkeypatch.setattr(module, "_run", lambda *_: pytest.fail("script host was called"))
+    devices, warnings = module._visible_gpus("win32")
+    assert [row["vendor"] for row in devices] == ["nvidia", "intel"]
+    assert all(row["source"] == "windows_display_api" for row in devices)
+    assert not warnings
 
 
 def test_cuda_driver_baselines_and_cim_not_cuda_evidence():

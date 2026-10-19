@@ -120,28 +120,40 @@ def _vendor(name):
     return "unknown"
 
 
+def _windows_display_names():
+    """Enumerate visible adapters through user32, without a script host."""
+    import ctypes
+    from ctypes import wintypes
+
+    class DisplayDevice(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("device_name", wintypes.WCHAR * 32),
+                    ("device_string", wintypes.WCHAR * 128), ("state_flags", wintypes.DWORD),
+                    ("device_id", wintypes.WCHAR * 128), ("device_key", wintypes.WCHAR * 128)]
+
+    enum = ctypes.WinDLL("user32").EnumDisplayDevicesW
+    enum.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(DisplayDevice), wintypes.DWORD]
+    enum.restype = wintypes.BOOL
+    names = []
+    for index in range(MAX_DEVICES):
+        device = DisplayDevice()
+        device.cb = ctypes.sizeof(DisplayDevice)
+        if not enum(None, index, ctypes.byref(device), 0):
+            break
+        if device.device_string:
+            names.append(device.device_string)
+    return names
+
+
 def _visible_gpus(host_platform):
     devices, warnings = [], []
     if host_platform == "win32":
-        powershell = shutil.which("powershell.exe")
-        if powershell:
-            output = _run([powershell, "-NoProfile", "-NonInteractive", "-Command",
-                           "Get-CimInstance Win32_VideoController | Select-Object -First 16 Name,DriverVersion | ConvertTo-Json -Compress"])
-            if output is None:
-                warnings.append("Windows display adapter probe unavailable or timed out")
-            try:
-                rows = json.loads(output or "[]")
-                if isinstance(rows, dict):
-                    rows = [rows]
-                for row in rows[:MAX_DEVICES]:
-                    name = str(row.get("Name", ""))[:160]
-                    devices.append({"name": name, "vendor": _vendor(name),
-                                    "driver": str(row.get("DriverVersion", ""))[:80],
-                                    "source": "windows_cim"})
-            except (ValueError, TypeError, AttributeError):
-                warnings.append("Windows display adapter probe returned invalid data")
-        else:
-            warnings.append("Windows CIM probe unavailable")
+        try:
+            names = _windows_display_names()
+            devices.extend({"name": name[:160], "vendor": _vendor(name),
+                            "driver": "", "source": "windows_display_api"}
+                           for name in names[:MAX_DEVICES])
+        except (AttributeError, OSError):
+            warnings.append("Windows display adapter API unavailable")
     elif host_platform == "linux":
         # PCI vendor IDs enumerate visibility only, including integrated GPUs.
         vendors = {"0x10de": "nvidia", "0x1002": "amd", "0x8086": "intel"}

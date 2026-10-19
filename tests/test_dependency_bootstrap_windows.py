@@ -41,13 +41,12 @@ class BootstrapSourceTests(unittest.TestCase):
         self.assertNotRegex(source, r"(?im)^\s*call\s")
         self.assertNotIn("-ExecutionPolicy", source)
 
-    def test_cmd_uses_native_powershell_without_policy_override(self):
+    def test_cmd_uses_packaged_exe_or_explicit_python_without_scripts(self):
         text = CMD.read_text(encoding="utf-8")
-        self.assertIn("Sysnative\\WindowsPowerShell", text)
-        self.assertIn('-NoProfile -File "%~dp0tools\\dependency_manager\\bootstrap_windows.ps1" %*', text)
-        self.assertIn("exit /b %COAT_EXIT%", text)
-        self.assertIn("approved signed script", text)
-        self.assertNotRegex(text + self.source, r"(?i)-ExecutionPolicy|Set-ExecutionPolicy|ScriptBlock\]::Create")
+        self.assertIn("CoatingSimInstaller-*-windows-x64.exe", text)
+        self.assertIn("COAT_DEPENDENCY_PYTHON", text)
+        self.assertIn("source_entry.py", text)
+        self.assertNotRegex(text.lower(), r"powershell\.exe|pwsh(?:\.exe)?|-file|executionpolicy")
 
     def test_one_official_manifest_no_independent_python_pin(self):
         manifest = json.loads((SCRIPT.parent / "runtime_manifest.json").read_text())
@@ -238,15 +237,6 @@ class BootstrapSourceTests(unittest.TestCase):
         self.assertNotIn('Windows.Forms', self.source)
         self.assertNotIn('UserInteractive', self.source)
 
-    def test_linux_pwsh_does_not_run_windows_native_contracts(self):
-        case = BootstrapSourceTests("test_native_powershell_offline_harness_when_available")
-        result = unittest.TestResult()
-        with patch.object(sys, "platform", "linux"), patch.object(shutil, "which", return_value="pwsh"), patch.object(subprocess, "run") as run:
-            case.run(result)
-        self.assertEqual(len(result.skipped), 1)
-        self.assertIn("requires Windows", result.skipped[0][1])
-        run.assert_not_called()
-
     def test_native_diagnostics_decode_utf8_and_local_encoding(self):
         self.assertEqual(_native_text(None), "")
         self.assertEqual(_native_text("error"), "error")
@@ -254,27 +244,29 @@ class BootstrapSourceTests(unittest.TestCase):
         with patch.object(locale, "getencoding", return_value="cp936"):
             self.assertEqual(_native_text("错误".encode("cp936")), "错误")
 
-    def test_native_powershell_offline_harness_when_available(self):
-        if sys.platform != "win32":
-            self.skipTest("Full native harness requires Windows registry/path contracts; Windows source CI runs it")
-        executable = shutil.which("powershell.exe") or shutil.which("pwsh")
-        if not executable:
-            self.skipTest("PowerShell is absent; native harness awaits Windows source CI")
-        result = subprocess.run([executable, "-NoLogo", "-NoProfile", "-File",
-                                 str(ROOT / "tests/dependency_bootstrap_windows_offline.ps1"),
-                                 "-BootstrapScript", str(SCRIPT), "-SourcePython", sys.executable],
-                                capture_output=True, timeout=120)
-        self.assertEqual(result.returncode, 0, _native_text(result.stdout) + _native_text(result.stderr))
-        help_result = subprocess.run([executable, "-NoLogo", "-NoProfile", "-File", str(SCRIPT),
-                                      "-Help", "doctor", "--json"],
-                                     capture_output=True, timeout=30)
-        self.assertEqual(help_result.returncode, 0, _native_text(help_result.stdout) + _native_text(help_result.stderr))
-        self.assertIn("dependency_manager.cmd", _native_text(help_result.stdout))
+    @unittest.skipUnless(sys.platform == "win32", "requires Windows CMD")
+    def test_no_python_or_pwsh_fails_without_script_execution(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            entry = Path(temporary) / "dependency_manager.cmd"
+            entry.write_bytes(CMD.read_bytes())
+            environment = os.environ.copy()
+            environment["COAT_DEPENDENCY_PYTHON"] = ""
+            environment["PATH"] = str(Path(temporary))
+            result = subprocess.run([os.environ["COMSPEC"], "/d", "/c", str(entry), "-CheckOnly"],
+                                    env=environment, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("No PowerShell script", _native_text(result.stderr))
+
+    @unittest.skipUnless(sys.platform == "win32", "requires Windows CMD")
+    def test_explicit_python_check_only_works_when_scripts_are_blocked(self):
+        environment = os.environ.copy()
+        environment["COAT_DEPENDENCY_PYTHON"] = sys.executable
+        result = subprocess.run([os.environ["COMSPEC"], "/d", "/c", str(CMD), "-CheckOnly"],
+                                env=environment, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, _native_text(result.stderr))
         report = json.loads(_native_text(result.stdout).strip().splitlines()[-1])
-        self.assertEqual(report["status"], "success")
-        self.assertGreater(report["assertions"], 70)
-        self.assertFalse(report["network_used"])
-        self.assertEqual(report["real_installers_executed"], 0)
+        self.assertEqual(report["status"], "ready")
+        self.assertFalse(report["installed"])
 
 
 if __name__ == "__main__":

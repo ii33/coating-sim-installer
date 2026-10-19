@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .compute_recommendation import END_USER_GROUPS, recommend_environment
-from .desktop_shortcut import ensure_desktop_shortcut
+from .desktop_shortcut import ensure_desktop_shortcut, shortcut_failure
 from .git_runtime import discover_git, execute_git_runtime, plan_git_runtime
 from .launchers import execute_launch_entries, plan_launch_entries
 from .manager import execute_plan, inspect_environment, plan_environment
@@ -449,19 +449,27 @@ def run_interactive(
                 show(launch_plan)
                 say("启动入口准备失败；冲突文件已保留，请查看以上诊断。")
                 return 2
+        desktop_result = {"status": "success", "skipped": True}
         if sys.platform == "win32":
-            desktop_result = ensure_desktop_shortcut(app)
+            try:
+                desktop_result = ensure_desktop_shortcut(app)
+            except Exception as exc:  # noncritical: a shortcut must not fail a completed install
+                desktop_result = shortcut_failure(exc, proxy)
             if not success(desktop_result):
-                say("项目已安装，但桌面快捷方式未完成；请查看诊断，重试不会覆盖无关文件。")
-                return 2
-            say("桌面快捷方式：" + str(desktop_result.get("path", "")))
+                # Noncritical post-step: the installation and its verified
+                # environment are complete and retained. Report the concrete error
+                # and let the GUI retry only the shortcut; never rerun installation.
+                say("安装已完成，但桌面快捷方式未完成（不影响使用）："
+                    + "; ".join(desktop_result.get("errors", []))
+                    + "；可在界面中单独重试创建，不会重新安装或覆盖无关文件。")
+            else:
+                say("桌面快捷方式：" + str(desktop_result.get("path", "")))
         if cancel.is_set():
             raise KeyboardInterrupt
         say(f"安装完成：{app}；可使用 {app / '.venv'} 中的 Python 启动 launcher.py。")
         if event_fn is not None:
             event_fn({"event": "completion", "operation": "install", "target": str(app),
-                      "compute_route": dict(compute_route),
-                      "shortcut": desktop_result if sys.platform == "win32" else {"status": "success", "skipped": True}})
+                      "compute_route": dict(compute_route), "shortcut": desktop_result})
         return 0
     except (KeyboardInterrupt, EOFError):
         cancel.set()

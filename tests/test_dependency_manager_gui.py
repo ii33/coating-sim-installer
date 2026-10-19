@@ -669,17 +669,24 @@ def test_failure_retry_clears_terminal_state_and_can_succeed(window, monkeypatch
     assert not app.retry_button.winfo_viewable()
 
 
-def test_shortcut_failure_cannot_show_all_success_and_cancel_wins_over_stale_success(window, monkeypatch, tmp_path):
+def test_shortcut_failure_is_noncritical_warning_and_cancel_still_wins(window, monkeypatch, tmp_path):
     def flow(project, **kwargs):
         kwargs["event_fn"]({"event": "completion", "target": str(project),
             "shortcut": {"status": "failed", "errors": ["Desktop is read-only"]}})
         return 0
     monkeypatch.setattr(gui, "run_interactive", flow)
     app = gui.DependencyManagerWindow(window, tmp_path / "shortcut-failed")
+    window.deiconify()
     app.start()
     pump(window, lambda: not app.busy)
-    assert app.last_code == 2 and app.terminal_state == "failed"
-    assert "Desktop is read-only" in app.result_detail.get() and "安装完成" not in app.result_title.get()
+    # Noncritical: install completed, the concrete error is shown, and only the
+    # dedicated shortcut retry is offered (never a full install rerun).
+    assert app.last_code == 0 and app.terminal_state == "warning"
+    assert "安装完成" in app.result_title.get() and "桌面快捷方式" in app.result_title.get()
+    assert "Desktop is read-only" in app.result_detail.get()
+    assert app.shortcut_button.winfo_viewable() and not app.retry_button.winfo_viewable()
+    assert str(app.exit_button.cget("state")) == "normal"
+
     def cancelled(project, **kwargs):
         kwargs["cancel_event"].set()
         kwargs["event_fn"]({"event": "completion", "shortcut": {"status": "success"}})
@@ -688,6 +695,112 @@ def test_shortcut_failure_cannot_show_all_success_and_cancel_wins_over_stale_suc
     app.start()
     pump(window, lambda: not app.busy)
     assert app.last_code == 130 and app.terminal_state == "cancelled" and "已取消" in app.result_title.get()
+    assert not app.shortcut_button.winfo_viewable()
+
+
+@pytest.mark.parametrize("outcome,state,title", [
+    ({"status": "success", "path": "isolated QA desktop/Coating Sim.lnk", "reused": True}, "success", "桌面快捷方式已就绪"),
+    ({"status": "failed", "errors": ["desktop still blocked"]}, "failed", "桌面快捷方式仍未完成"),
+])
+def test_shortcut_retry_only_recreates_shortcut_without_rerunning_install(
+        window, monkeypatch, tmp_path, outcome, state, title):
+    from unittest.mock import MagicMock
+
+    installed = []
+    def flow(project, **kwargs):
+        installed.append(str(project))
+        kwargs["event_fn"]({"event": "completion", "operation": "install", "target": str(project),
+            "shortcut": {"status": "failed", "errors": ["desktop blocked"]}})
+        return 0
+    monkeypatch.setattr(gui, "run_interactive", flow)
+    monkeypatch.setattr(gui, "update_project", lambda *a, **k: pytest.fail("shortcut retry must not update source"))
+    shortcut = MagicMock(return_value=outcome)
+    monkeypatch.setattr(gui, "ensure_desktop_shortcut", shortcut)
+    app = gui.DependencyManagerWindow(window, tmp_path / "shortcut-retry")
+    window.deiconify()
+    app.start()
+    pump(window, lambda: not app.busy)
+    assert app.terminal_state == "warning" and app.shortcut_button.winfo_viewable()
+    target = app.current_target
+
+    app.shortcut_button.invoke()
+    pump(window, lambda: not app.busy)
+    assert shortcut.call_count == 1
+    assert str(shortcut.call_args.args[0]) == target
+    assert len(installed) == 1  # no install/update rerun
+    assert app.terminal_state == state and title in app.result_title.get()
+    assert app.last_code == (0 if state == "success" else 2)
+    if state == "success":
+        assert not app.shortcut_button.winfo_viewable()
+    else:
+        assert "desktop still blocked" in app.result_detail.get()
+        assert app.shortcut_button.winfo_viewable() and not app.retry_button.winfo_viewable()
+
+
+def test_project_update_shortcut_warning_retry_only_recreates_shortcut(window, monkeypatch, tmp_path):
+    from unittest.mock import MagicMock
+
+    updates = []
+    def update(root, provider, **kwargs):
+        updates.append((str(root), provider))
+        return {"status": "success", "up_to_date": False, "current_version": "dev.20261017.99",
+                "source_changed": True, "shortcut": {"status": "failed", "errors": ["desktop blocked"]},
+                "warnings": ["主项目已更新并保留；桌面快捷方式未完成：desktop blocked"]}
+    monkeypatch.setattr(gui, "update_project", update)
+    monkeypatch.setattr(gui, "run_interactive", lambda *a, **k: pytest.fail("shortcut retry must not install"))
+    shortcut = MagicMock(return_value={"status": "success", "path": "isolated/Coating Sim.lnk", "reused": False})
+    monkeypatch.setattr(gui, "ensure_desktop_shortcut", shortcut)
+    app = gui.DependencyManagerWindow(window, tmp_path / "update-retry")
+    window.deiconify()
+    app.start("project-update")
+    pump(window, lambda: not app.busy)
+    assert app.last_code == 0 and app.terminal_state == "warning"
+    assert "更新完成" in app.result_title.get() and "桌面快捷方式" in app.result_title.get()
+    assert "desktop blocked" in app.result_detail.get()
+    assert app.shortcut_button.winfo_viewable() and not app.retry_button.winfo_viewable()
+    target = app.current_target
+
+    app.shortcut_button.invoke()
+    pump(window, lambda: not app.busy)
+    # The dedicated retry touches only the same project target and never updates again.
+    assert len(updates) == 1 and updates[0][1] == "cnb"
+    assert shortcut.call_count == 1
+    assert str(shortcut.call_args.args[0]) == target
+    assert app.terminal_state == "success" and "桌面快捷方式已就绪" in app.result_title.get()
+    assert not app.shortcut_button.winfo_viewable()
+
+
+def test_cancel_during_shortcut_retry_is_reported_without_rerunning_update(window, monkeypatch, tmp_path):
+    from unittest.mock import MagicMock
+
+    entered, release = threading.Event(), threading.Event()
+    def shortcut(target):
+        entered.set()
+        assert release.wait(3)
+        return {"status": "success", "path": "isolated/Coating Sim.lnk", "reused": False}
+    monkeypatch.setattr(gui, "ensure_desktop_shortcut", MagicMock(side_effect=shortcut))
+    monkeypatch.setattr(gui, "run_interactive", lambda *a, **k: pytest.fail("must not install"))
+    updates = []
+    def update(root, provider, **kwargs):
+        updates.append((str(root), provider))
+        return {"status": "success", "up_to_date": False, "current_version": "v",
+                "shortcut": {"status": "failed", "errors": ["blocked"]}}
+    monkeypatch.setattr(gui, "update_project", update)
+    app = gui.DependencyManagerWindow(window, tmp_path / "cancel-retry")
+    window.deiconify()
+    app.start("project-update")
+    pump(window, lambda: not app.busy)
+    assert app.terminal_state == "warning"
+    app.shortcut_button.invoke()
+    assert entered.wait(2)
+    # Cancellation is meaningful: the retry reports cancelled and never repeats update.
+    app.cancel()
+    release.set()
+    pump(window, lambda: not app.busy)
+    assert app.last_code == 130 and app.terminal_state == "cancelled" and "已取消" in app.result_title.get()
+    assert len(updates) == 1
+    assert not app.shortcut_button.winfo_viewable()
+
 
 
 def test_queued_success_cannot_override_a_cancel_request(window, tmp_path):

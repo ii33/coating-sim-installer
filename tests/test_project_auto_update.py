@@ -169,6 +169,117 @@ def test_dependency_failure_or_cancel_restores_old_source_under_lock(installatio
     f['preserved']()
 
 
+def test_shortcut_failure_keeps_updated_source_and_reports_warning(installation):
+    f = installation
+    latest = f['newer']()
+    f['desktop'].return_value = {'status': 'failed', 'errors': ['桌面写入被拒绝']}
+    result = f['update']()
+    # The verified source update and dependency transaction are retained: a
+    # noncritical shortcut failure returns success-with-warning, never a rollback.
+    assert result['status'] == 'success' and result['source_changed'] is True, result
+    assert result['current_commit'] == latest
+    assert 'source_rolled_back' not in result
+    assert result['shortcut']['status'] == 'failed'
+    assert any('桌面快捷方式未完成' in warning and '桌面写入被拒绝' in warning
+               for warning in result['warnings'])
+    assert f['command'](f['app'], 'rev-parse', 'HEAD') == latest
+    assert (f['app'] / 'source.py').read_text() == 'value = 2\n'
+    assert f['execute'].call_count == 1
+    receipt = json.loads((f['app'] / '.git/coating-installer-update.json').read_text(encoding='utf-8'))
+    assert receipt['state'] == 'success' and receipt['new_commit'] == latest
+    assert receipt['shortcut_status'] == 'failed'
+    f['preserved']()
+
+
+def test_already_current_update_with_shortcut_failure_stays_success_without_reinstall(installation):
+    f = installation
+    f['desktop'].return_value = {'status': 'failed', 'errors': ['桌面写入被拒绝']}
+    before = f['command'](f['app'], 'rev-parse', 'HEAD')
+    result = f['update']()
+    # Source already current: no dependency transaction is re-run, no rollback,
+    # and the shortcut failure is a noncritical success-with-warning.
+    assert result['status'] == 'success' and result['up_to_date'] is True
+    assert result['current_commit'] == before and result['source_changed'] is False
+    assert 'source_rolled_back' not in result
+    assert result['shortcut']['status'] == 'failed'
+    assert any('桌面快捷方式未完成' in warning and '桌面写入被拒绝' in warning
+               for warning in result['warnings'])
+    f['execute'].assert_not_called()
+    assert f['command'](f['app'], 'rev-parse', 'HEAD') == before
+    assert (f['app'] / 'source.py').read_text() == 'value = 1\n'
+    receipt = json.loads((f['app'] / '.git/coating-installer-update.json').read_text(encoding='utf-8'))
+    assert receipt['state'] == 'success' and receipt['shortcut_status'] == 'failed'
+    f['preserved']()
+
+
+def test_cancellation_at_update_shortcut_post_step_keeps_verified_update(installation, monkeypatch):
+    f = installation
+    latest = f['newer']()
+    cancel = threading.Event()
+    shortcut = MagicMock()
+    monkeypatch.setattr(updater, 'ensure_desktop_shortcut', shortcut)
+    # Cancel exactly at the post-step: after the verified identity/version check,
+    # before the noncritical shortcut. read_text is called once for the old
+    # version and once for the verified current version.
+    real_read_text = Path.read_text
+    seen = []
+
+    def read_text(self, *args, **kwargs):
+        text = real_read_text(self, *args, **kwargs)
+        if self.name == 'version.txt':
+            seen.append(text)
+            if len(seen) == 2:
+                cancel.set()
+        return text
+
+    monkeypatch.setattr(Path, 'read_text', read_text)
+    result = f['update'](cancel_event=cancel)
+    # The verified update is committed: cancellation must not roll it back.
+    assert result['status'] == 'success'
+    assert result['current_commit'] == latest
+    assert 'source_rolled_back' not in result
+    assert f['command'](f['app'], 'rev-parse', 'HEAD') == latest
+    assert (f['app'] / 'source.py').read_text() == 'value = 2\n'
+    assert any('桌面快捷方式未完成' in warning for warning in result['warnings'])
+    shortcut.assert_not_called()
+    receipt = json.loads((f['app'] / '.git/coating-installer-update.json').read_text(encoding='utf-8'))
+    assert receipt['state'] == 'success' and receipt['new_commit'] == latest
+    f['preserved']()
+
+
+def test_raising_shortcut_is_noncritical_and_does_not_roll_back_update(installation):
+    f = installation
+    latest = f['newer']()
+    # An unexpected ordinary Exception (e.g. an injected Windows API error) must
+    # not roll back the verified update: the boundary converts it to a redacted
+    # failed payload and the update still reports success-with-warning.
+    f['desktop'].side_effect = OSError('desktop API failed at https://user:pass@example.invalid/desktop')
+    result = f['update']()
+    assert result['status'] == 'success' and result['source_changed'] is True
+    assert result['current_commit'] == latest and 'source_rolled_back' not in result
+    assert result['shortcut']['status'] == 'failed'
+    error = "; ".join(result['shortcut']['errors'])
+    assert 'OSError' in error and 'desktop API failed' in error
+    assert 'example.invalid' in error and 'user:pass' not in error
+    assert any('桌面快捷方式未完成' in warning for warning in result['warnings'])
+    assert f['command'](f['app'], 'rev-parse', 'HEAD') == latest
+    assert (f['app'] / 'source.py').read_text() == 'value = 2\n'
+    assert f['execute'].call_count == 1
+    receipt = json.loads((f['app'] / '.git/coating-installer-update.json').read_text(encoding='utf-8'))
+    assert receipt['state'] == 'success' and receipt['new_commit'] == latest
+    assert receipt['shortcut_status'] == 'failed'
+    f['preserved']()
+
+
+def test_shortcut_keyboard_interrupt_is_not_swallowed_by_update(installation):
+    f = installation
+    f['newer']()
+    f['desktop'].side_effect = KeyboardInterrupt
+    # BaseException is never converted into a shortcut failure by the boundary.
+    with pytest.raises(KeyboardInterrupt):
+        f['update']()
+
+
 def test_shared_operation_lock_blocks_duplicate_update(installation):
     f = installation
     with project_operation(f['container']):

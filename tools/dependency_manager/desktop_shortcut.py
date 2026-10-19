@@ -7,10 +7,24 @@ import tempfile
 from pathlib import Path
 
 from . import launchers
+from .mirrors import redact
 from .project_operations import owned_record, save_record
 from .runtime_paths import unlinked_local_path
 
 SCHEMA = "coating-desktop-v1"
+
+
+def shortcut_failure(exc, proxy=None):
+    """Failed shortcut payload for an unexpected error at a noncritical boundary.
+
+    Callers wrap the shortcut step with this so an ordinary Exception cannot fail
+    a completed install or roll back a verified update. KeyboardInterrupt and
+    other BaseException are never passed here. An empty message falls back to the
+    exception class name.
+    """
+    reason = str(exc).strip()
+    message = f"{type(exc).__name__}: {reason}" if reason else type(exc).__name__
+    return {"status": "failed", "errors": [redact(message, proxy)], "warnings": []}
 
 
 def ensure_desktop_shortcut(root, *, desktop=None):

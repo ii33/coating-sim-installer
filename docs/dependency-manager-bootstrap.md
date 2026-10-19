@@ -2,13 +2,15 @@
 
 推荐使用 Release 的单文件 EXE：界面自带 Python/Tcl/Tk，应用始终使用安装目录内官方 NuGet Python3.12.10 x64。
 
-`install.bat` 和 `dependency_manager.cmd` 使用原生 PowerShell5.1+，不修改执行策略。默认终端入口不扫描 PATH、py launcher 或 PythonCore 注册；无本项目私有运行时时，确认来源/许可后由 `bootstrap_private.ps1` 下载、校验并安全解压官方 NuGet 包。流程不调用 Python EXE/MSI。
+普通 Windows 安装入口使用打包 EXE；`install.bat` 在 EXE 同目录时直接转交它。源码 `dependency_manager.cmd` 不执行 PowerShell 脚本：没有打包 EXE 时，只接受明确指定的 `COAT_DEPENDENCY_PYTHON` 或现有 `.runtime/python/python.exe`。安装阶段由 Python 管理器下载、校验并部署项目私有 NuGet 运行时。企业应用控制、下载策略或桌面写入策略仍可能阻止执行；安装器不会更改执行策略或关闭安全措施。
 
 ```text
 dependency_manager.cmd -BootstrapProjectRoot C:\CoatingTest
 dependency_manager.cmd -BootstrapProjectRoot C:\CoatingTest -CheckOnly
 dependency_manager.cmd -Cli -BootstrapProjectRoot C:\CoatingTest runtime-plan --mirror pypi --json
 ```
+
+这些源码 CLI 示例需先在当前进程设置 `COAT_DEPENDENCY_PYTHON` 为可信 Python 的完整路径；普通用户使用打包 EXE。旧 `.ps1` 保留为开发诊断资料，不再由 Windows 安装入口调用。
 
 `-CheckOnly` 为只读核验，不进入下载。可显式用 `-BootstrapPython <完整Python路径>` 或 `COAT_DEPENDENCY_PYTHON` 指定承载源码安装器界面的工具解释器；它不会成为应用环境基础。源码 GUI 需要 Tcl/Tk，NuGet 包不含 Tk，未显式提供工具解释器时请使用已封装 GUI EXE。应用私有解释器与工具解释器的版本可以不同。
 

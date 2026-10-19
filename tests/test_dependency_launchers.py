@@ -1,7 +1,6 @@
 """Offline launch-entry contracts. No user desktop writes or application start."""
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -10,94 +9,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tools.dependency_manager import launchers
-
-_SHORTCUT_DIAGNOSTIC_SCRIPT = r'''param([string]$Spec)
-$ErrorActionPreference = 'Stop'
-[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-$s = Get-Content -LiteralPath $Spec -Raw -Encoding UTF8 | ConvertFrom-Json
-$rows = @()
-foreach ($case in $s.cases) {
-    $stage = 'CreateShortcut'
-    $row = @{name=$case.name; length=$case.target.Length;
-             exists=[System.IO.File]::Exists($case.target)}
-    try {
-        $w = New-Object -ComObject WScript.Shell
-        $link = $w.CreateShortcut($case.link)
-        $stage = 'TargetPath'
-        $link.TargetPath = $case.target
-        $stage = 'Save'
-        $link.Save()
-        $stage = 'Readback'
-        $read = $w.CreateShortcut($case.link)
-        $row.targetMatches = ($read.TargetPath -ceq $case.target)
-        $row.readback = $read.TargetPath
-        $row.success = $true
-    } catch {
-        $row.success = $false
-        $row.stage = $stage
-        $e = $_.Exception
-        $row.exception = $e.GetType().FullName
-        $row.hresult = ('0x{0:X8}' -f $e.HResult)
-        while ($e.InnerException) { $e = $e.InnerException }
-        $row.innerException = $e.GetType().FullName
-        $row.innerHresult = ('0x{0:X8}' -f $e.HResult)
-        $row.message = $e.Message.Substring(0, [Math]::Min(400, $e.Message.Length))
-    }
-    $rows += $row
-}
-@{os=[Environment]::OSVersion.VersionString; powershell=$PSVersionTable.PSVersion.ToString();
-  process64=[Environment]::Is64BitProcess; os64=[Environment]::Is64BitOperatingSystem;
-  acp=[Text.Encoding]::Default.CodePage; culture=[Globalization.CultureInfo]::CurrentCulture.Name;
-  cases=$rows} | ConvertTo-Json -Depth 5 -Compress
-'''
-
-
-def _native_failure_diagnostic(plan, temporary):
-    """Failure-only evidence, restricted to disposable fixtures; no target runs."""
-    target = str(plan.get('python', ''))
-    evidence = {'python_repr': repr(target), 'python_length': len(target),
-                'python_exists': Path(target).is_file()}
-    try:
-        base = Path(temporary) / 'shortcut-diagnostics'
-        base.mkdir()
-        cases = [{'name': 'original', 'target': target, 'link': str(base / 'original.lnk')}]
-        # Preserve the original spelling in the comparison, without normalizing
-        # the production target or assuming an extended-prefix root cause.
-        if target and not target.startswith('\\\\?\\'):
-            extended = ('\\\\?\\UNC\\' + target[2:] if target.startswith('\\\\')
-                        else '\\\\?\\' + target)
-            cases.append({'name': 'original-extended', 'target': extended,
-                          'link': str(base / 'original-extended.lnk')})
-        for name, folder in (('ascii', 'ascii'), ('chinese', '中文'),
-                             ('punctuation', "space & ! % ' project"),
-                             ('full', "中文 space & ! % ' project")):
-            directory = base / folder / '.venv' / 'Scripts'
-            directory.mkdir(parents=True)
-            for kind in ('placeholder', 'real'):
-                python = directory / (kind + '.exe')
-                if kind == 'placeholder':
-                    python.write_bytes(b'placeholder')
-                else:
-                    shutil.copyfile(sys.executable, python)
-                label = name + '-' + kind
-                cases.append({'name': label, 'target': str(python),
-                              'link': str(base / (label + '.lnk'))})
-        spec, script = base / 'spec.json', base / 'probe.ps1'
-        spec.write_text(json.dumps({'cases': cases}), encoding='utf-8')
-        script.write_text(_SHORTCUT_DIAGNOSTIC_SCRIPT, encoding='utf-8-sig')
-        powershell = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
-        run = subprocess.run([str(powershell), '-NoProfile', '-NonInteractive', '-File',
-                              str(script), '-Spec', str(spec)], capture_output=True,
-                             timeout=30, shell=False)
-        evidence['diagnostic_exit'] = run.returncode
-        # Fixed matrix, bounded report, and existing redaction; never dump env.
-        for label, output in (('stdout', run.stdout), ('stderr', run.stderr)):
-            text = output.decode('utf-8-sig', errors='replace')
-            evidence[label] = launchers.redact(text)[:20000 if label == 'stdout' else 1500]
-    except Exception as exc:
-        # Diagnostics must never replace the original acceptance-test failure.
-        evidence['diagnostic_error'] = launchers._shortcut_output(str(exc))
-    return evidence
 
 
 class LaunchEntryTests(unittest.TestCase):
@@ -213,26 +124,10 @@ class LaunchEntryTests(unittest.TestCase):
         destination.mkdir()
         plan = self.plan(shortcut='custom', output_dir=destination)
         result = launchers.execute_launch_entries(plan, confirmed=True)
-        diagnostic = (_native_failure_diagnostic(plan, self.temp.name)
-                      if result['status'] != 'success' else None)
-        self.assertEqual(result['status'], 'success', {'result': result, 'diagnostic': diagnostic})
-        powershell = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
-        script = self.root / 'read-link.ps1'
-        script.write_text(
-            "param([string]$Link)\n$ErrorActionPreference = 'Stop'\n"
-            "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n"
-            "Add-Type -TypeDefinition @'\n" + launchers._SHELL_LINK_SOURCE + "\n'@\n"
-            "$s = [CoatingLauncher.NativeShortcut]::Read($Link)\n"
-            "@{target=$s[0]; arguments=$s[1]; cwd=$s[2]; icon=$s[3]} | ConvertTo-Json -Compress\n",
-            encoding='utf-8-sig')
-        read = subprocess.run([str(powershell), '-NoProfile', '-NonInteractive', '-File', str(script),
-                               '-Link', result['files'][1]['path']], capture_output=True, timeout=30)
-        self.assertEqual(read.returncode, 0, read.stderr)
-        data = json.loads(read.stdout.decode('utf-8-sig'))
-        self.assertEqual(Path(data['target']), Path(plan['python']))
-        self.assertEqual(Path(data['cwd']), self.root)
-        self.assertEqual(data['arguments'], subprocess.list2cmdline(['-E', str(self.root / 'launcher.py')]))
-        self.assertEqual(data['icon'], plan['icon'] + ',0')
+        self.assertEqual(result['status'], 'success', result)
+        # The production COM writer reads back target, arguments, cwd and icon
+        # before returning; this test needs no .ps1 or developer mode.
+        self.assertGreater(Path(result['files'][1]['path']).stat().st_size, 76)
 
     def test_symlink_output_is_preserved(self):
         if os.name == 'nt':
@@ -243,38 +138,6 @@ class LaunchEntryTests(unittest.TestCase):
         output.symlink_to(target)
         self.assertEqual(self.plan()['status'], 'blocked')
         self.assertEqual(target.read_text(), 'keep')
-
-
-class ShortcutFailureDiagnosticTests(unittest.TestCase):
-    def test_matrix_is_local_bounded_and_preserves_target(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            executable = Path(temporary) / 'test-interpreter.exe'
-            executable.write_bytes(b'real interpreter stand-in; never run')
-            target = r"C:\fixture\中文 space & ! % ' project\.venv\Scripts\python.exe"
-            completed = subprocess.CompletedProcess([], 0, b'x' * 25000, b'password=hidden')
-            with patch.dict(os.environ, {'SystemRoot': temporary}), \
-                    patch.object(sys, 'executable', str(executable)), \
-                    patch.object(subprocess, 'run', return_value=completed) as run:
-                evidence = _native_failure_diagnostic({'python': target}, temporary)
-            spec = json.loads((Path(temporary) / 'shortcut-diagnostics/spec.json').read_text())
-            self.assertEqual(len(spec['cases']), 10)
-            self.assertEqual(spec['cases'][0]['target'], target)
-            self.assertEqual(spec['cases'][1]['target'], '\\\\?\\' + target)
-            for case in spec['cases']:
-                self.assertTrue(Path(case['link']).is_relative_to(temporary))
-            self.assertEqual(evidence['python_repr'], repr(target))
-            self.assertEqual(len(evidence['stdout']), 20000)
-            self.assertNotIn('hidden', evidence['stderr'])
-            self.assertEqual(run.call_args.kwargs,
-                             {'capture_output': True, 'timeout': 30, 'shell': False})
-            self.assertNotIn('-ExecutionPolicy', run.call_args.args[0])
-
-    def test_diagnostic_error_is_returned_not_raised(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            with patch.object(shutil, 'copyfile', side_effect=OSError('password=hidden')):
-                evidence = _native_failure_diagnostic({'python': 'fixture.exe'}, temporary)
-            self.assertIn('diagnostic_error', evidence)
-            self.assertNotIn('hidden', evidence['diagnostic_error'])
 
 
 if __name__ == '__main__':

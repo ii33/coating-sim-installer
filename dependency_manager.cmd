@@ -1,17 +1,33 @@
 @echo off
-setlocal
-rem Managed Python defaults to this source project; -BootstrapProjectRoot selects another installation root.
-rem Use native Windows PowerShell; do not override the machine's execution policy.
-set "COAT_POWERSHELL=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
-if exist "%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe" set "COAT_POWERSHELL=%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
-if not exist "%COAT_POWERSHELL%" (
-  >&2 echo Windows PowerShell 5.1 is required. No settings have been changed.
+setlocal DisableDelayedExpansion
+rem The packaged installer is the normal Windows entry. No script host or policy change.
+set "COAT_INSTALLER="
+for %%F in ("%~dp0CoatingSimInstaller-*-windows-x64.exe" "%~dp0dist\CoatingSimInstaller-*-windows-x64.exe") do if exist "%%~fF" if not defined COAT_INSTALLER set "COAT_INSTALLER=%%~fF"
+if defined COAT_INSTALLER if "%~1"=="" goto packaged
+if defined COAT_INSTALLER if /I "%~1"=="-Gui" if "%~2"=="" goto packaged
+if defined COAT_INSTALLER if /I "%~1"=="--project" goto packaged_args
+if defined COAT_INSTALLER if /I "%~1"=="--self-check" goto packaged_args
+if defined COAT_INSTALLER if /I "%~1"=="--smoke-gui" goto packaged_args
+if defined COAT_INSTALLER if /I "%~1"=="--smoke-outcome" goto packaged_args
+if defined COAT_INSTALLER if /I "%~1"=="--version" goto packaged_args
+rem Advanced source CLI needs an explicit or already project-private interpreter.
+set "COAT_PYTHON=%COAT_DEPENDENCY_PYTHON%"
+if not defined COAT_PYTHON if exist "%~dp0.runtime\python\python.exe" set "COAT_PYTHON=%~dp0.runtime\python\python.exe"
+if not defined COAT_PYTHON (
+  >&2 echo Source CLI requires COAT_DEPENDENCY_PYTHON or an existing private runtime.
+  >&2 echo Normal Windows installation uses the packaged CoatingSimInstaller EXE.
+  >&2 echo No PowerShell script or execution-policy change was attempted.
   exit /b 2
 )
-"%COAT_POWERSHELL%" -NoLogo -NoProfile -File "%~dp0tools\dependency_manager\bootstrap_windows.ps1" %*
-set "COAT_EXIT=%ERRORLEVEL%"
-if "%COAT_EXIT%"=="1" (
-  >&2 echo If PowerShell reported a script policy or signature block, ask your administrator for an approved signed script. See docs\dependency-manager-bootstrap.md.
-  >&2 echo This launcher does not change or bypass execution policy. With Python already installed, python dependency_manager.py is an alternative source entry point.
+if not exist "%COAT_PYTHON%" (
+  >&2 echo Selected Python executable does not exist.
+  exit /b 2
 )
-exit /b %COAT_EXIT%
+"%COAT_PYTHON%" -I -S -B "%~dp0tools\dependency_manager\source_entry.py" %*
+exit /b %ERRORLEVEL%
+:packaged
+"%COAT_INSTALLER%"
+exit /b %ERRORLEVEL%
+:packaged_args
+"%COAT_INSTALLER%" %*
+exit /b %ERRORLEVEL%
