@@ -1,0 +1,47 @@
+name: Publish alpha.9 installer
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-alpha9.yml']
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: c40c09e91b53563625744994fa94d7e69e373c94
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -r requirements-build.txt
+      - run: python -m PyInstaller --noconfirm --clean installer.spec
+      - name: Verify frozen installer and write checksum
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path 'dist/CoatingSimInstaller-v0.1.0-alpha.9-windows-x64.exe').Path
+          $report = Join-Path $env:RUNNER_TEMP 'installer-self-check.json'
+          $p = Start-Process $exe -ArgumentList @('--self-check','--self-check-output',$report) -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw 'Executable self-check failed' }
+          $result = Get-Content $report -Raw | ConvertFrom-Json
+          if ($result.status -ne 'success' -or !$result.frozen) { throw 'Invalid self-check result' }
+          $item = Get-Item $exe
+          if ($item.VersionInfo.ProductVersion -ne '0.1.0-alpha.9') { throw 'Wrong embedded version' }
+          $name = [IO.Path]::GetFileName($exe)
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText((Join-Path (Get-Location) 'dist/SHA256SUMS.txt'), "$hash  $name`n")
+      - name: Publish GitHub prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = 'v0.1.0-alpha.9'
+          $target = 'c40c09e91b53563625744994fa94d7e69e373c94'
+          $notes = @(
+            'Desktop shortcut failures now leave a completed install or verified update intact, show the cause, and offer a shortcut-only retry.'
+            'The Windows install entry and Shell Link creation no longer require PowerShell; shortcuts use native Windows APIs.'
+            'Windows x64 onefile EXE passed build self-check and GUI/temporary shortcut smoke checks. A real installation on the affected machine was not repeated. Unsigned prerelease; verify SHA256SUMS.txt.'
+          )
+          [IO.File]::WriteAllLines((Join-Path (Get-Location) 'dist/release-notes-alpha9.md'), $notes)
+          gh release create $tag dist/CoatingSimInstaller-v0.1.0-alpha.9-windows-x64.exe dist/SHA256SUMS.txt --repo ii33/coating-sim-installer --target $target --title 'v0.1.0-alpha.9' --notes-file dist/release-notes-alpha9.md --prerelease
