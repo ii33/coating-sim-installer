@@ -1,0 +1,69 @@
+name: Publish alpha.12 installer
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-alpha12.yml']
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -r requirements-build.txt
+      - run: python -m pytest -q
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+      - run: python -m PyInstaller --noconfirm --clean installer.spec
+      - name: Verify frozen GUI, paths, and child processes
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path 'dist/CoatingSimInstaller-v0.1.0-alpha.12-windows-x64.exe').Path
+          $item = Get-Item $exe
+          if ($item.VersionInfo.ProductVersion -ne '0.1.0-alpha.12') { throw 'Wrong embedded version' }
+          $bytes = [IO.File]::ReadAllBytes($exe)
+          $subsystem = [BitConverter]::ToUInt16($bytes, [BitConverter]::ToInt32($bytes, 0x3c) + 24 + 68)
+          if ($subsystem -ne 2) { throw 'Installer is not a Windows GUI executable' }
+          $folder = Join-Path $env:RUNNER_TEMP '中文 空格 安装器'
+          New-Item -ItemType Directory -Path $folder -Force | Out-Null
+          $copied = Join-Path $folder $item.Name
+          Copy-Item $exe $copied
+          $report = Join-Path $env:RUNNER_TEMP 'installer-self-check.json'
+          $p = Start-Process $copied -WorkingDirectory $env:RUNNER_TEMP -ArgumentList ('--self-check --self-check-output "' + $report + '"') -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw 'Executable self-check failed' }
+          $result = Get-Content $report -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ($result.status -ne 'success' -or !$result.frozen -or $result.default_project -ne $folder) { throw 'Wrong frozen default target' }
+          $guiReport = Join-Path $env:RUNNER_TEMP 'installer-gui-smoke.json'
+          $p = Start-Process $copied -WorkingDirectory $env:RUNNER_TEMP -ArgumentList ('--smoke-gui --self-check-output "' + $guiReport + '"') -PassThru -Wait
+          $gui = Get-Content $guiReport -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ($p.ExitCode -ne 0 -or $gui.status -ne 'success' -or !$gui.visible -or $gui.project -ne $folder) { throw 'GUI smoke/default target failed' }
+          $venv = Join-Path $env:RUNNER_TEMP 'child process venv'
+          $venvReport = Join-Path $env:RUNNER_TEMP 'installer-venv-check.json'
+          $python = (Get-Command python).Source
+          $p = Start-Process $copied -WorkingDirectory $env:RUNNER_TEMP -ArgumentList ('--verify-venv "' + $venv + '" --python "' + $python + '" --self-check-output "' + $venvReport + '"') -PassThru -Wait
+          $checked = Get-Content $venvReport -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ($p.ExitCode -ne 0 -or $checked.status -ne 'success' -or $checked.network_used -or $checked.packages_installed) { throw 'Offline child process check failed' }
+          $signature = Get-AuthenticodeSignature $exe
+          if ($signature.Status -ne 'NotSigned') { throw 'Expected unsigned alpha artifact; review release notes before changing signing status' }
+          $name = [IO.Path]::GetFileName($exe)
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText((Join-Path (Get-Location) 'dist/SHA256SUMS.txt'), "$hash  $name`n", [System.Text.UTF8Encoding]::new($false))
+      - name: Publish GitHub prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = 'v0.1.0-alpha.12'
+          $target = '${{ github.sha }}'
+          $notesPath = Join-Path (Get-Location) 'dist/release-notes-alpha12.md'
+          $notes = [IO.File]::ReadAllText((Join-Path (Get-Location) 'docs/releases/v0.1.0-alpha.12.md'), [System.Text.Encoding]::UTF8)
+          $hash = (Get-FileHash 'dist/CoatingSimInstaller-v0.1.0-alpha.12-windows-x64.exe' -Algorithm SHA256).Hash.ToLowerInvariant()
+          $run = 'https://github.com/ii33/coating-sim-installer/actions/runs/${{ github.run_id }}'
+          $notes += "`n`n源码提交：$target`nWindows 发布验证：$run`nEXE SHA256：$hash`n"
+          [IO.File]::WriteAllText($notesPath, $notes, [System.Text.UTF8Encoding]::new($false))
+          gh release create $tag dist/CoatingSimInstaller-v0.1.0-alpha.12-windows-x64.exe dist/SHA256SUMS.txt --repo ii33/coating-sim-installer --target $target --title 'v0.1.0-alpha.12' --notes-file dist/release-notes-alpha12.md --prerelease

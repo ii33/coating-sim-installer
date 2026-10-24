@@ -1,6 +1,6 @@
 # Isolated private compute roles (implementation checkpoint)
 
-This is an **opt-in CLI transaction**, not yet the default interactive/GUI installer path or a new installer release. Windows x64 end-to-end acceptance is still required. The legacy GUI remains a one-venv path; do not describe this checkpoint as completing the default-installation requirement.
+This is an **opt-in source CLI transaction** included with alpha.12 source, not yet the default interactive/GUI installer path or an entry exposed by the frozen EXE. Windows x64 end-to-end acceptance is still required. The legacy GUI remains a one-venv path; do not describe this checkpoint as completing the default-installation requirement.
 
 ## Layout and ownership
 
@@ -24,7 +24,7 @@ python -m tools.dependency_manager runtime-roles-plan --project C:\Coating\app -
 python -m tools.dependency_manager runtime-roles-install --project C:\Coating\app --runtime-cuda auto --plan-id REVIEWED_PLAN_ID --yes --json
 ```
 
-The Python running the installer front-end is not the application bootstrap Python. A frozen installer can run the same CLI. Role creation uses only the checked private base, never `--python`, `--venv`, or `--runtime-dir` overrides. `--runtime-cuda cpu` means no CUDA environment; it does not remove DirectML. Development tooling is included only with explicit `--profile development`.
+The Python running this source CLI front-end is not the application bootstrap Python. The current frozen EXE entry does not forward these CLI commands; run them from the installer source checkout. Role creation uses only the checked private base, never `--python`, `--venv`, or `--runtime-dir` overrides. `--runtime-cuda cpu` means no CUDA environment; it does not remove DirectML. Development tooling is included only with explicit `--profile development`.
 
 Planning is read-only: it records requirements-file hashes, fixed environment scopes, package/interpreter/config snapshots, GPU evidence, and the prior binding-file hash. Execution requires the current exact plan, serializes the operation, revalidates source scope and ownership, and uses the existing binary-only resolver/install/verification transaction independently per environment. Automatic CUDA selection is only an installation candidate, not a readiness claim.
 

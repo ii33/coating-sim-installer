@@ -4,9 +4,9 @@
 
 独立在线安装器，为公开项目 [ii33/coating-sim](https://github.com/ii33/coating-sim) 部署源码、项目私有 Python、依赖和启动脚本。安装器自身的 Python/Tcl/Tk 与应用 Python 分开；双击 EXE 不要求预装 Python。
 
-## alpha.11 使用方式
+## alpha.12 使用方式
 
-1. 下载 `CoatingSimInstaller-v0.1.0-alpha.11-windows-x64.exe`，核对同一 Release 的 `SHA256SUMS.txt` 后启动。
+1. 下载 `CoatingSimInstaller-v0.1.0-alpha.12-windows-x64.exe`，核对同一 Release 的 `SHA256SUMS.txt` 后启动。
 2. 安装目录默认是 EXE 所在目录；从源码运行时默认是入口脚本所在目录。可以在界面输入或浏览另选目录，明确传入的 `--project` 也优先于默认值。选择源码来源（默认 CNB，可切换 GitHub）。清华 TUNA PyPI 默认启用；取消镜像加速使用官方源。已有项目记录的源及明确选择优先，不修改系统或用户全局 pip 配置。
 3. 确认计划后，安装器将 **CPython 官方 NuGet Python 3.12.10 x64** 解压到 `<目标>/.runtime/python`，只用该解释器创建 `<目标>/app/.venv`。不扫描或复用系统 Python，不运行 Python EXE/MSI，不改注册或 PATH。
 4. 完成依赖安装和安装后检查后，用生成的 `app/launch-coating.cmd` 启动；该脚本只使用项目 `.venv`。已有资源、未知运行时和不属于项目私有 Python 的旧环境均保留，需要另选目录。
@@ -14,6 +14,8 @@
 “检查 / 准备 Python”仅部署或核验本项目私有运行时。已由本工具部署且完整清单未变化的运行时可安全重入，不重复破坏重装。
 
 ## 下载、镜像及兼容性
+
+alpha.12 新增的是[可选源码 CLI 分环境入口](docs/isolated-runtime-roles.md)，当前 EXE 入口及默认 GUI 安装流程未接入。它不代表完整原生依赖闭包或干净机器全流程安装已通过。详见[本版说明](docs/releases/v0.1.0-alpha.12.md)。
 
 Python 运行时镜像与 PyPI 包索引是两种来源。启用镜像加速时，Python 使用已实际比对的华为云 **NuGet** 镜像；下载或校验失败安全回退官方 NuGet。两个来源均须匹配固定的官方制品 SHA256，不能接受未知镜像、关闭 TLS 或改用 GitHub 任意代理。持续收到数据时允许超过 180 秒；连接/响应头等待 10 秒、无数据读取 15 秒，每来源最多两次，从头重试，可取消。保留 128 MiB 下载上限、256 MiB 解压上限、安全路径预检及校验后原子发布。
 
