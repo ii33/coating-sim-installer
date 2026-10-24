@@ -40,7 +40,7 @@ def check_project(directory, venv=None, groups=("desktop",), backend="cpu", prof
     result = {"schema_version": 1, "operation": "project_check", "status": "success",
               "directory": str(root), "internal_version": _version(root),
               "commit": None, "ref": None, "dirty": None,
-              "submodule_dirty": "not_checked", "dirty_scope": "parent_worktree_excluding_submodules",
+              "submodule_dirty": "not_checked", "dirty_scope": "parent_worktree_excluding_submodules_and_untracked_private_runtimes",
               "source": {"provider": "unknown", "url": None},
               "provenance": "unknown", "comparison": "unknown" if check_remote else "not_requested",
               "warnings": [], "errors": []}
@@ -64,8 +64,9 @@ def check_project(directory, venv=None, groups=("desktop",), backend="cpu", prof
                 raise ValueError("Local Git commit is invalid")
             result.update(commit=commit, provenance="git",
                           ref=run(["rev-parse", "--abbrev-ref", "HEAD"]).strip(),
-                          dirty=bool(deploy._readonly_status(run)))
-            result["warnings"].append("Git content filters are disabled during read-only status; filter-transformed files may conservatively appear modified. Submodule worktrees are not inspected; dirty describes the parent worktree only")
+                          dirty=bool(deploy._readonly_status(run, untracked=False) or
+                                     deploy._readonly_status(run, exclude_private_runtimes=True)))
+            result["warnings"].append("Git content filters are disabled during read-only status; filter-transformed files may conservatively appear modified. Submodule worktrees are not inspected; all tracked edits and ordinary untracked user files count as dirty, but untracked .runtime/.venv contents do not")
             # A missing/unsupported origin is honest unknown provenance, not an error.
             try:
                 url = run(["config", "--get", "remote.origin.url"]).strip()

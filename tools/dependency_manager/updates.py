@@ -177,8 +177,8 @@ def check_project_updates(container, provider="cnb", *, proxy=None, cancel_event
             if not deploy._SHA.fullmatch(commit):
                 raise ValueError("Invalid local commit")
             result["local_commit"] = commit
-            result["dirty"] = bool(deploy._readonly_status(run))
-            result["dirty_scope"] = "parent worktree excluding submodules; filters disabled conservatively"
+            result["dirty"] = bool(deploy._readonly_status(run, untracked=False))
+            result["dirty_scope"] = "tracked parent worktree excluding submodules; private runtimes/user files excluded; filters disabled conservatively"
         if provider == "github":
             remote = fetch("/repos/ii33/coating-sim/commits/main", proxy, cancel_event)
             latest = remote["sha"]

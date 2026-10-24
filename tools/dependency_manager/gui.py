@@ -1,4 +1,4 @@
-"""Small stdlib Tk front end for the existing interactive installation flow."""
+"""Small stdlib Tk front end for project-private role installation."""
 
 from __future__ import annotations
 
@@ -16,9 +16,10 @@ from typing import Any
 
 from .app_info import VERSION, icon_path
 from .completion_state import terminal_outcome
+from .default_install import run_default_installation
 from .desktop_shortcut import ensure_desktop_shortcut
 from .download_progress import DownloadProgress, byte_text
-from .interactive import project_directory, run_interactive
+from .interactive import project_directory
 from .mirrors import ProxyConfig, redact, resolve_mirror
 from .project_operations import project_operation
 from .project_update import update_project
@@ -40,11 +41,11 @@ except ImportError:
     ttk = None
 
 PHASES = {
-    "python": "检查兼容 Python",
-    "recommend": "检测硬件与计算后端",
+    "python": "准备项目私有 Python（不复用系统环境）",
+    "recommend": "检测硬件，规划 app / CPU、独立 DirectML、硬件适配 CUDA 与 appearance 环境",
     "source": "准备源码：下载所选来源到新 app 目录（此阶段会写入源码）",
-    "dependencies": "安装依赖：正在运行已确认的安装计划",
-    "verify": "核验目标环境与计算后端",
+    "dependencies": "安装私有角色依赖：app / CPU、独立 DirectML、硬件适配 CUDA 与 appearance",
+    "verify": "核验私有角色环境；已安装不等于 GPU 已验证可用",
     "launch": "创建启动脚本：短事务正在完成，取消将等待安全收尾",
 }
 QUESTIONS = {
@@ -153,11 +154,11 @@ class DependencyManagerWindow:
         self.mirror.trace_add("write", lambda *unused: setattr(self, "mirror_changed", True))
         self.development = tk.BooleanVar(value=False)
         self.backend = tk.StringVar(value="auto")
-        self.backend_hint = tk.StringVar(value="auto：CPU 基础安装；按证据启用可选 GPU")
+        self.backend_hint = tk.StringVar(value="自动完整安装：app / CPU、独立 DirectML、硬件适配 CUDA、appearance；GPU 可用性另行核验")
         self.details_expanded = False
         self.update_channel = tk.StringVar(value="preview")
         self.update_page = None
-        self.status = tk.StringVar(value="选择安装目录和来源，然后安装。Python 与项目 Qt 环境相互独立。")
+        self.status = tk.StringVar(value="选择安装目录和来源，然后安装项目私有的完整角色环境。")
         self.log_path = tk.StringVar(value="日志将在开始操作后保存到安装目录。")
         self.session = None
         self.worker = None
@@ -243,7 +244,7 @@ class DependencyManagerWindow:
         ttk.Label(device, textvariable=self.backend_hint, wraplength=410).pack(side="left", padx=8)
         self.controls.append(self.backend_control)
         hint = self.runtime_notice_label = ttk.Label(details,
-            text="安装将自动准备 Python、Git、源码、依赖和启动入口。已有文件不会被覆盖。\n" + managed_runtime_notice(),
+            text="安装将准备项目私有 Python、Git、源码和启动入口，分别安装 app / CPU、DirectML、硬件适配 CUDA 与 appearance 环境。\nDirectML 不会因存在 CUDA 而省略；已安装不代表 GPU 已验证可用。已有未知文件不会被覆盖。\n" + managed_runtime_notice(),
             wraplength=640)
         hint.grid(row=4, column=0, sticky="ew", pady=8)
         tools = ttk.Frame(details)
@@ -368,9 +369,10 @@ class DependencyManagerWindow:
         compute = completion.get("compute_route") or {}
         if compute:
             details.append("设备选择：" + compute.get("requested_backend", "auto") +
-                           "；实际计划：" + compute.get("planned_backend", "cpu") +
-                           "；已验证可用：" + compute.get("usable_backend", "未确认"))
+                           "；硬件路由计划：" + compute.get("planned_backend", "cpu") +
+                           "；已验证可用：" + (compute.get("usable_backend") or "未确认"))
             details.append(compute.get("reason", ""))
+            details.append("环境已安装不等于 GPU 已验证可用；DirectML 与计划中的 CUDA 使用独立环境。")
         if view["state"] == "success" and needs_shortcut:
             shortcut = completion["shortcut"]
             state = "已存在并验证" if shortcut.get("reused") else "已创建"
@@ -475,6 +477,11 @@ class DependencyManagerWindow:
         self._clear_result()
         self.operation_name = operation
         self.current_target = self.directory.get()
+        # Tk variables belong to the GUI thread. Every operation receives these
+        # immutable values, never live controls or worker-time selection reads.
+        selected_backend = self.backend.get()
+        selected_source = self.source.get()
+        selected_development = self.development.get()
         try:
             root = Path(self.directory.get()).expanduser().absolute()
             self.current_target = str(project_directory(root))
@@ -494,16 +501,13 @@ class DependencyManagerWindow:
             self._render_result({"code": 2, "reason": self.status.get()})
             return
         self.session = InstallerSession({
-            "directory": str(root), "source": "1" if self.source.get() == "cnb" else "2",
+            "directory": str(root), "source": "1" if selected_source == "cnb" else "2",
             "mirror": "y" if chosen_mirror != "pypi" else "n",
-            "development": "y" if self.development.get() else "n",
+            "development": "y" if selected_development else "n",
             # Clicking Install authorizes these bounded project-local steps only.
             **({"python": "y", "git": "y", "install": "y"} if operation == "install" else {}),
         })
         session = self.session
-        selected_backend = self.backend.get()
-        selected_source = self.source.get()
-        selected_development = self.development.get()
         self.operation_name = operation
         self.total_phases = 5 if operation == "project-update" else len(PHASES)
         self._show_progress()
@@ -560,6 +564,9 @@ class DependencyManagerWindow:
                             completion.update(operation=operation, target=self.current_target,
                                 shortcut=result.get("shortcut"), up_to_date=result.get("up_to_date"),
                                 version=result.get("current_version"))
+                            for key in ("compute_route", "runtime_roles", "manifest"):
+                                if key in result:
+                                    completion[key] = result[key]
                             summary = ("主项目已是最新源码：" if result.get("up_to_date") else "主项目更新完成：") + result.get("current_version", "")
                             if result.get("warnings"):
                                 summary += "；" + "；".join(result["warnings"])
@@ -569,12 +576,15 @@ class DependencyManagerWindow:
                     elif operation == "python":
                         proxy = ProxyConfig("env")
                         code, completion_details, summary = prepare_python(root, proxy, session.cancel_event, review, output, session.prompt, mirror=chosen_mirror)
-                    else:
-                        code = run_interactive(root, output=output, prompt_fn=session.prompt,
+                    elif operation == "install":
+                        code = run_default_installation(root, output=output, prompt_fn=session.prompt,
                                                phase_fn=lambda value: session.send("phase", value),
                                                plan_fn=review, cancel_event=session.cancel_event, mirror=chosen_mirror,
                                                backend=None if selected_backend == "auto" else selected_backend,
-                                               pipeline=True, event_fn=event)
+                                               event_fn=event, source=selected_source,
+                                               development=selected_development)
+                    else:
+                        raise ValueError("Unknown GUI operation: " + str(operation))
             except (KeyboardInterrupt, EOFError):
                 code = 130
             except Exception as exc:

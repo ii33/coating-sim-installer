@@ -201,7 +201,7 @@ def _resolve_commit(run, ref, repository_url=REPOSITORY_URL):
     return {"requested_ref": ref, "resolved_ref": selected, "commit": commit}
 
 
-def _readonly_status(run):
+def _readonly_status(run, *, untracked=True, exclude_private_runtimes=False):
     # status can invoke clean/process filters when refreshing working-tree blobs.
     # Read names only, never credential-bearing config values, and override every
     # configured filter for this command without changing any config or index.
@@ -212,7 +212,10 @@ def _readonly_status(run):
             if len(key) > 4096 or any(ord(char) < 32 for char in key):
                 raise ValueError("Unsafe Git filter configuration key; status was not run")
             overrides.extend(["-c", key + ("=false" if key.endswith(".required") else "=")])
-    return run([*overrides, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=all"])
+    paths = ["--", ".", ":(top,exclude).runtime", ":(top,exclude).venv"] if exclude_private_runtimes else []
+    return run([*overrides, "status", "--porcelain",
+                "--untracked-files=all" if untracked else "--untracked-files=no",
+                "--ignore-submodules=all", *paths])
 
 
 def _source_inputs(directory):
@@ -251,7 +254,8 @@ def _save_new(path, data):
 def plan_project_deployment(directory, ref="main", groups=("desktop",), backend="cpu",
                             profile="runtime", mirror=None, python=None, proxy=None, *,
                             emit=None, cancel_event=None, timeout=300,
-                            source="github", repository_url=None, git_path=None):
+                            source="github", repository_url=None, git_path=None,
+                            source_only=False):
     """Prepare a new fixed-project checkout and its ordinary dependency plan."""
     proxy, emit, cancel_event = proxy or ProxyConfig(), emit or (lambda event: None), cancel_event or threading.Event()
     plan: dict[str, Any] = {
@@ -259,6 +263,9 @@ def plan_project_deployment(directory, ref="main", groups=("desktop",), backend=
         "repository": REPOSITORY, "repository_url": REPOSITORY_URL,
         "requires_confirmation": True, "warnings": [], "errors": [],
     }
+    if source_only:
+        plan.update(operation="project_source_prepare", source_only=True,
+                    requires_confirmation=False)
     state = None
     try:
         proxy.validate()
@@ -266,14 +273,15 @@ def plan_project_deployment(directory, ref="main", groups=("desktop",), backend=
         repository_url = origin["url"]
         plan.update(repository_url=repository_url, provider=origin["provider"])
         ref = _validated_ref(ref)
-        if profile not in manager.PROFILES or backend not in manager.BACKENDS:
-            raise ValueError("Select a supported runtime/development profile and compute backend")
-        groups = tuple(groups)
-        if not groups or any(group not in manager.GROUPS for group in groups):
-            raise ValueError("Select at least one known dependency group")
-        mirror = resolve_mirror(directory, mirror)
-        if mirror not in MIRRORS:
-            raise ValueError("Unknown registry mirror")
+        if not source_only:
+            if profile not in manager.PROFILES or backend not in manager.BACKENDS:
+                raise ValueError("Select a supported runtime/development profile and compute backend")
+            groups = tuple(groups)
+            if not groups or any(group not in manager.GROUPS for group in groups):
+                raise ValueError("Select at least one known dependency group")
+            mirror = resolve_mirror(directory, mirror)
+            if mirror not in MIRRORS:
+                raise ValueError("Unknown registry mirror")
         if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not math.isfinite(timeout) or not 1 <= timeout <= 3600:
             raise ValueError("Git fetch timeout must be between 1 and 3600 seconds")
         if not directory:
@@ -322,15 +330,24 @@ def plan_project_deployment(directory, ref="main", groups=("desktop",), backend=
             raise ValueError("Selected ref does not contain the supported deposition-sim project")
         if (destination / ".venv").exists() or (destination / ".venv").is_symlink():
             raise ValueError("Source ref contains a target environment; no existing environment will be overwritten")
-        dependency = manager.plan_environment(destination, destination / ".venv", groups,
-                                              backend, mirror, "install", python, proxy, profile)
-        plan.update(dependency_plan=dependency, source_inputs=_source_inputs(destination),
-                    proxy=proxy.public(), git_timeout=timeout, profile=profile,
-                    groups=dependency["groups"], backend=backend,
-                    status="ready" if dependency["status"] == "ready" else "blocked")
-        plan["warnings"].extend(dependency["warnings"])
-        plan["warnings"].append("Source checkout is prepared; dependency execution still requires this plan's confirmation. No application or tests have been started")
-        plan["errors"].extend(dependency["errors"])
+        if cancel_event.is_set():
+            raise InterruptedError("Project fetch cancelled after preparing the checkout; source is preserved")
+        plan.update(source_inputs=_source_inputs(destination), proxy=proxy.public(),
+                    git_timeout=timeout)
+        if source_only:
+            if cancel_event.is_set():
+                raise InterruptedError("Project fetch cancelled after verifying source inputs; source is preserved")
+            plan["status"] = "ready"
+            plan["warnings"].append("Source checkout is prepared only; no Python discovery, dependency planning, installation, application or tests have been started. This receipt is not an executable deployment plan")
+        else:
+            dependency = manager.plan_environment(destination, destination / ".venv", groups,
+                                                  backend, mirror, "install", python, proxy, profile)
+            plan.update(dependency_plan=dependency, profile=profile,
+                        groups=dependency["groups"], backend=backend,
+                        status="ready" if dependency["status"] == "ready" else "blocked")
+            plan["warnings"].extend(dependency["warnings"])
+            plan["warnings"].append("Source checkout is prepared; dependency execution still requires this plan's confirmation. No application or tests have been started")
+            plan["errors"].extend(dependency["errors"])
     except InterruptedError as exc:
         plan["status"] = "cancelled"
         plan["errors"].append(redact(str(exc), proxy))
@@ -342,12 +359,30 @@ def plan_project_deployment(directory, ref="main", groups=("desktop",), backend=
     plan["plan_id"] = _plan_id(plan)
     if state:
         try:
-            _save_new(state / "plan.json", plan)
+            _save_new(state / ("source.json" if source_only else "plan.json"), plan)
         except OSError as exc:
             plan["status"] = "failed"
-            plan["errors"].append("Could not save the deployment plan: " + redact(str(exc), proxy))
+            label = "source preparation receipt" if source_only else "deployment plan"
+            plan["errors"].append("Could not save the " + label + ": " + redact(str(exc), proxy))
             plan["plan_id"] = _plan_id(plan)
     return plan
+
+
+def prepare_project_source(directory, ref="main", proxy=None, *, emit=None,
+                           cancel_event=None, timeout=300, source="github",
+                           repository_url=None, git_path=None):
+    """Prepare a fresh verified Git checkout without planning or running Python.
+
+    The ready receipt exposes the pinned ``source["commit"]``, ``directory``
+    and hashed ``source_inputs`` for a separate private-runtime coordinator.
+    It cannot be executed as an ordinary dependency deployment plan. Existing
+    destinations, including incomplete checkouts, are never reused or removed.
+    """
+    return plan_project_deployment(
+        directory, ref=ref, proxy=proxy, emit=emit, cancel_event=cancel_event,
+        timeout=timeout, source=source, repository_url=repository_url,
+        git_path=git_path, source_only=True,
+    )
 
 
 def read_project_deployment_plan(directory):
@@ -377,6 +412,8 @@ def execute_project_deployment(plan, confirmed=False, emit=None, cancel_event=No
     proxy, cancel_event, emit = proxy or ProxyConfig(), cancel_event or threading.Event(), emit or (lambda event: None)
     state, locked = None, False
     try:
+        if plan.get("source_only") or plan.get("operation") == "project_source_prepare":
+            raise ValueError("Source-only checkout receipts are not executable dependency deployment plans")
         proxy.validate()
         if plan.get("status") != "ready" or plan.get("plan_id") != _plan_id(plan):
             raise ValueError("Deployment plan is blocked or altered; prepare a fresh deployment")

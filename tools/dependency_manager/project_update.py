@@ -2,15 +2,12 @@
 import os
 import threading
 import time
-from pathlib import Path
 
-from . import manager, private_runtime, runtime
+from . import default_install
 from . import project_deploy as deploy
-from .compute_recommendation import END_USER_GROUPS
-from .desktop_shortcut import ensure_desktop_shortcut, shortcut_failure
 from .git_runtime import discover_git
 from .interactive import CNB_URL, project_directory
-from .mirrors import ProxyConfig, redact, resolve_mirror
+from .mirrors import ProxyConfig, redact
 from .project_operations import owned_record, project_operation, save_record
 from .runtime_paths import unlinked_local_path
 
@@ -19,7 +16,7 @@ KNOWN_ORIGINS = {deploy.REPOSITORY_URL, deploy.REPOSITORY_URL[:-4], CNB_URL, CNB
 
 
 def update_project(container, provider="cnb", *, mirror="tuna", backend=None, development=False,
-                   emit=None, output=None, phase_fn=None, cancel_event=None, proxy=None, desktop=None):
+                   emit=None, output=None, phase_fn=None, cancel_event=None, proxy=None):
     cancel = cancel_event or threading.Event()
     proxy = proxy or ProxyConfig("env")
     output = output or (lambda value: None)
@@ -28,6 +25,8 @@ def update_project(container, provider="cnb", *, mirror="tuna", backend=None, de
     app, journal, run = None, None, None
     previous, latest, original_branch = None, None, None
     changed = False
+    roles_started = False
+    managed_completion = {}
     lease = None
     lease_entered = False
 
@@ -45,6 +44,11 @@ def update_project(container, provider="cnb", *, mirror="tuna", backend=None, de
         if phase_fn:
             phase_fn(text)
         log(text)
+
+    def dependency_active():
+        return any(os.path.lexists(path) for path in (
+            app / ".venv.dependency-manager.lock", app / ".git" / deploy._STATE / "execute.lock",
+            app / ".runtime/compute-runtime-install.lock"))
 
     def version():
         path = app / "coat_sim/version.txt"
@@ -89,7 +93,7 @@ def update_project(container, provider="cnb", *, mirror="tuna", backend=None, de
             raise ValueError("本地存在隐藏修改检查的 Git 索引标记；已停止更新，未清除标记")
         if not tracked_clean():
             raise ValueError("检测到本地源码修改；已停止更新。请先保存/提交修改或选择新的安装目录")
-        if (app / ".venv.dependency-manager.lock").exists() or (app / ".git" / deploy._STATE / "execute.lock").exists():
+        if dependency_active():
             raise ValueError("此项目的依赖安装仍在运行；请等待结束后再更新")
         previous = run(["rev-parse", "--verify", "HEAD"]).strip()
         if not deploy._SHA.fullmatch(previous):
@@ -101,6 +105,9 @@ def update_project(container, provider="cnb", *, mirror="tuna", backend=None, de
             raise ValueError("上次更新尚需恢复，请检查记录：" + str(journal))
         if prior and prior.get("state") == "applying" and previous not in (prior.get("old_commit"), prior.get("new_commit")):
             raise ValueError("上次更新中断后源码提交又发生变化；请先检查恢复记录")
+        # All mutating updates use the same authenticated current-layout contract.
+        # Mere sibling-base/marker presence never authorizes an interpreter probe.
+        layout_record = {"runtime_layout": "managed_roles"}
         old_version = version()
         result.update(local_version=old_version, local_commit=previous, provider=provider)
         latest = deploy._resolve_commit(run, "refs/heads/main", source["url"])["commit"]
@@ -122,61 +129,68 @@ def update_project(container, provider="cnb", *, mirror="tuna", backend=None, de
                     raise ValueError("更新会与已有工程/配置/数据文件冲突，已保留：" + relative)
             if not tracked_clean() or run(["rev-parse", "HEAD"]).strip() != previous:
                 raise ValueError("下载期间本地源码发生变化；已停止")
-            if (app / ".venv.dependency-manager.lock").exists():
+            if dependency_active():
                 raise ValueError("依赖任务正在运行；源码未切换")
             save_record(journal, {"state": "applying", "old_commit": previous, "new_commit": latest,
-                                 "old_version": old_version, "provider": provider}, root=app, schema=SCHEMA)
+                                 "old_version": old_version, "provider": provider, **layout_record}, root=app, schema=SCHEMA)
             phase("应用主项目源码更新")
             # No force/reset/clean: Git also protects ignored collision paths.
             changed = True
             run(["checkout", "--quiet", "--no-overwrite-ignore", "--detach", latest])
             result["source_changed"] = True
-        if latest != previous or (prior and prior.get("state") == "applying"):
-            phase("检查并更新项目私有依赖")
-            chosen_backend = backend or "cpu"
-            profile = "development" if development else "runtime"
-            inspected = manager.inspect_environment(app, app / ".venv", END_USER_GROUPS, chosen_backend, profile)
-            target = inspected["target"]
-            base = Path(target.get("base_prefix", ""))
-            if (not target.get("valid") or base not in (app.parent / ".runtime/python", app / ".runtime/python")):
-                raise ValueError("既有环境不属于此安装的项目私有 Python；已保留，不修改外部环境")
-            private_runtime.inspect_owned(base, runtime.runtime_manifest(), cancel)
-            plan = manager.plan_environment(app, app / ".venv", END_USER_GROUPS, chosen_backend,
-                resolve_mirror(container, mirror), "repair", str(base / "python.exe"), proxy, profile)
-            if plan["status"] != "ready":
-                raise ValueError("新依赖计划受阻：" + "; ".join(plan.get("errors", [])))
-            dependency = manager.execute_plan(plan, True, event, cancel, proxy)
-            result["dependency_result"] = dependency
-            if dependency["status"] != "success":
-                if cancel.is_set() or dependency["status"] == "cancelled":
-                    raise InterruptedError("依赖更新已取消")
-                raise ValueError("依赖更新未完成：" + "; ".join(dependency.get("errors", [])))
+        phase("检查并更新项目私有分环境依赖")
+        # Even an unchanged HEAD can need repair after a partial role install.
+        # Record before entering any runtime writer, including same-HEAD repair.
+        save_record(journal, {"state": "applying", "old_commit": previous, "new_commit": latest,
+            "old_version": old_version, "provider": provider, **layout_record}, root=app, schema=SCHEMA)
+        roles_started = True
+        messages = []
+        def managed_output(text):
+            messages[:] = [redact(str(text), proxy)]
+            log(text)
+        def managed_event(value):
+            if value.get("event") == "completion":
+                managed_completion.update(value)
+            else:
+                # The coordinator also sends event text through output.
+                emit({**value, "component": "主项目"})
+        def managed_review(value):
+            if value.get("operation") == "compute_route":
+                result["compute_route"] = dict(value)
+                if value.get("summary"):
+                    log(value["summary"])
+            event({"event": "plan", **value})
+        code = default_install.run_default_installation(container, output=managed_output,
+            prompt_fn=lambda key: "y", phase_fn=phase, plan_fn=managed_review, cancel_event=cancel,
+            mirror=mirror, backend=backend, event_fn=managed_event, source=provider, development=development)
+        result["runtime_layout"] = "managed_roles"
+        if code == 130 or cancel.is_set():
+            raise InterruptedError("分环境依赖更新已取消；已准备的角色环境保留，可重试")
+        if code != 0 or not managed_completion:
+            detail = messages[-1] if messages else "未收到分环境安装完成验证"
+            raise ValueError("分环境依赖更新未完成：" + detail)
+        # Installed role bindings are not evidence of numerical GPU readiness.
+        for key in ("compute_route", "runtime_roles", "manifest"):
+            if key in managed_completion:
+                result[key] = managed_completion[key]
+        # Role package transactions have their own timeouts and may take hours.
+        # Their duration must not consume the earlier Git source-fetch budget.
+        deadline = time.monotonic() + 30
         phase("验证当前主项目版本")
         if run(["rev-parse", "HEAD"]).strip() != latest or not tracked_clean():
             raise ValueError("更新后的源码身份/完整性检查失败")
         current_version = version()
-        # The verified source update and its dependencies are now applied: the
-        # update is committed and a cancellation observed at or after this point
-        # must never roll it back. The desktop shortcut is a noncritical post-step,
-        # so it does not use the raising phase() gate and is skipped when a
-        # cancellation was already requested (the caller still reports the cancel).
-        if cancel.is_set():
-            shortcut = {"status": "failed", "errors": ["更新已取消，桌面快捷方式未创建；可单独重试"]}
-        else:
-            if phase_fn:
-                phase_fn("准备桌面快捷方式")
-            log("准备桌面快捷方式")
-            try:
-                shortcut = ensure_desktop_shortcut(app, desktop=desktop)
-            except Exception as exc:  # noncritical: never roll back a verified update for a shortcut
-                shortcut = shortcut_failure(exc, proxy)
+        # The shared coordinator owns launcher/shortcut preparation. Its verified
+        # completion is required even for same-HEAD repair; there is no alternate
+        # updater-local dependency or shortcut installation path.
+        shortcut = managed_completion.get("shortcut") or {"status": "failed", "errors": ["未收到桌面快捷方式结果"]}
         if shortcut.get("status") != "success":
             shortcut_error = "; ".join(shortcut.get("errors", [])) or "未知错误"
             result["warnings"].append("主项目已更新并保留；桌面快捷方式未完成：" + shortcut_error)
             log("桌面快捷方式未完成（非关键；更新后的源码与依赖已保留）：" + shortcut_error)
         save_record(journal, {"state": "success", "old_commit": previous, "new_commit": latest,
             "version": current_version, "provider": provider, "shortcut": shortcut.get("path"),
-            "shortcut_status": shortcut.get("status"), "updated_at": time.time()}, root=app, schema=SCHEMA)
+            "shortcut_status": shortcut.get("status"), "updated_at": time.time(), **layout_record}, root=app, schema=SCHEMA)
         result.update(status="success", up_to_date=latest == previous, current_version=current_version,
                       current_commit=latest, shortcut=shortcut)
         log(("已是最新源码：" if latest == previous else "更新完成：") + current_version + " @ " + latest[:12])
@@ -200,7 +214,17 @@ def update_project(container, provider="cnb", *, mirror="tuna", backend=None, de
             result["warnings"].append("私有依赖可能已部分更新；可重试，或点击安装修复。工程/配置/运行数据未删除")
             try:
                 save_record(journal, {"state": "failed" if restored else "recovery_required", "old_commit": previous,
-                    "new_commit": latest, "errors": result["errors"], "source_rolled_back": restored}, root=app, schema=SCHEMA)
+                    "new_commit": latest, "errors": result["errors"], "source_rolled_back": restored,
+                    **layout_record}, root=app, schema=SCHEMA)
+            except (OSError, ValueError):
+                result["warnings"].append("恢复记录未能更新；原 applying 记录已保留")
+        elif roles_started:
+            # Same-HEAD role repair has no source checkout to undo. Keep its
+            # failed record and role files for an authenticated coordinator retry.
+            result["warnings"].append("私有角色依赖可能已部分更新；源码和用户数据保留，可重试分环境更新")
+            try:
+                save_record(journal, {"state": "failed", "old_commit": previous, "new_commit": latest,
+                    "errors": result["errors"], "runtime_layout": "managed_roles"}, root=app, schema=SCHEMA)
             except (OSError, ValueError):
                 result["warnings"].append("恢复记录未能更新；原 applying 记录已保留")
         return result

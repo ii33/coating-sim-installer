@@ -1,3 +1,4 @@
+"""Source-update safety with the current contained-runtime coordinator contract."""
 import hashlib
 import json
 import os
@@ -23,16 +24,20 @@ def installation(tmp_path, monkeypatch):
     environment = {**os.environ, 'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_TERMINAL_PROMPT': '0'}
     def command(directory, *args):
         return subprocess.check_output([git, '-c', 'user.name=Installer QA', '-c', 'user.email=qa@example.invalid',
-            '-c', 'commit.gpgsign=false', '-C', str(directory), *args], env=environment, stderr=subprocess.STDOUT, text=True).strip()
+            '-c', 'commit.gpgsign=false', '-C', str(directory), *args], env=environment, stderr=subprocess.STDOUT,
+            text=True, encoding='utf-8').strip()
     remote = tmp_path / 'synthetic-remote'
     remote.mkdir()
     command(remote, 'init', '--quiet', '--initial-branch=main', '--template=')
     (remote / 'coat_sim').mkdir()
-    (remote / 'coat_sim/version.txt').write_text('dev.20261017.1\n')
-    (remote / 'launcher.py').write_text('print("synthetic QA only")\n')
-    (remote / 'requirements.txt').write_text('')
-    (remote / 'source.py').write_text('value = 1\n')
-    (remote / '.gitignore').write_text('.venv/\nconfig/settings.json\ndata/runtime/\nlaunch-coating.cmd\n')
+    files = {
+        'coat_sim/version.txt': 'dev.20261017.1\n', 'launcher.py': '# inert synthetic fixture\n',
+        'requirements.txt': '', 'requirements-test.txt': '', 'source.py': 'value = 1\n',
+        'coat_sim/compute_runtime_manifest.py': '# inert runtime contract\n',
+        '.gitignore': '.venv/\n.runtime/\nconfig/settings.json\ndata/runtime/\nlaunch-coating.cmd\n',
+    }
+    for relative, text in files.items():
+        (remote / relative).write_text(text, encoding='utf-8')
     command(remote, 'add', '.')
     command(remote, 'commit', '--quiet', '-m', 'initial synthetic project')
     container = tmp_path / '隔离安装'
@@ -46,12 +51,15 @@ def installation(tmp_path, monkeypatch):
     (app / 'data/runtime/result.bin').write_bytes(b'user-result')
     (app / '.venv').mkdir()
     (app / '.venv/keep').write_bytes(b'private-venv')
-    base = container / '.runtime/python'
+    base = app / '.runtime/python'
     base.mkdir(parents=True)
     (base / 'keep').write_bytes(b'private-runtime')
+    config = app / '.venv/pyvenv.cfg'
+    config.write_text(f'home = {base}\nexecutable = {base / "python.exe"}\n'
+        'include-system-site-packages = false\n', encoding='utf-8')
     before = command(app, 'rev-parse', 'HEAD')
     real_run = updater.deploy._run_git
-    calls = []
+    calls, events = [], []
     def transport(executable, args, **kwargs):
         args = list(args)
         calls.append(args)
@@ -64,28 +72,40 @@ def installation(tmp_path, monkeypatch):
         return real_run(executable, mapped, **kwargs)
     monkeypatch.setattr(updater.deploy, '_run_git', transport)
     monkeypatch.setattr(updater, 'discover_git', lambda **kwargs: git)
-    monkeypatch.setattr(updater.manager, 'inspect_environment', lambda *a, **k: {'target': {'valid': True, 'base_prefix': str(base)}})
-    monkeypatch.setattr(updater.private_runtime, 'inspect_owned', lambda *a, **k: {})
-    planner = MagicMock(return_value={'status': 'ready'})
-    execute = MagicMock(return_value={'status': 'success'})
-    desktop = MagicMock(return_value={'status': 'success', 'path': 'isolated-desktop/Coating Sim.lnk'})
-    monkeypatch.setattr(updater.manager, 'plan_environment', planner)
-    monkeypatch.setattr(updater.manager, 'execute_plan', execute)
-    monkeypatch.setattr(updater, 'ensure_desktop_shortcut', desktop)
+    completion = {'event': 'completion', 'operation': 'install', 'target': str(app),
+        'compute_route': {'operation': 'compute_route', 'requested_backend': 'auto',
+            'backend_usable': {}, 'usable_backend': '未确认 GPU；应用/CPU 依赖已核验'},
+        'runtime_roles': {'app': 'app', 'deposition_cpu': 'app', 'deposition_directml': 'deposition_directml',
+            'deposition_cuda': 'deposition_cuda', 'appearance': 'appearance'},
+        'manifest': str(app / '.runtime/compute-runtimes.json'),
+        'shortcut': {'status': 'success', 'path': 'isolated-desktop/Coating Sim.lnk'}}
+    def install(root, **kwargs):
+        assert root == container
+        assert (container / '.app.coating-installer.lock').is_file()
+        receipt = json.loads((app / '.git/coating-installer-update.json').read_text(encoding='utf-8'))
+        assert receipt['state'] == 'applying' and receipt['runtime_layout'] == 'managed_roles'
+        for key in ('git', 'python', 'install'):
+            assert kwargs['prompt_fn'](key) == 'y'
+        kwargs['plan_fn'](completion['compute_route'])
+        kwargs['event_fn'](dict(completion))
+        return 0
+    real_install = updater.default_install.run_default_installation
+    coordinator = MagicMock(side_effect=install)
+    monkeypatch.setattr(updater.default_install, 'run_default_installation', coordinator)
     def newer(extra=None, keep_version=False):
-        (remote / 'source.py').write_text('value = 2\n')
+        (remote / 'source.py').write_text('value = 2\n', encoding='utf-8')
         if not keep_version:
-            (remote / 'coat_sim/version.txt').write_text('dev.20261017.2\n')
+            (remote / 'coat_sim/version.txt').write_text('dev.20261017.2\n', encoding='utf-8')
         if extra:
             path = remote / extra
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text('remote content\n')
+            path.write_text('remote content\n', encoding='utf-8')
             command(remote, 'add', '-f', extra)
         command(remote, 'add', '.')
         command(remote, 'commit', '--quiet', '-m', 'new synthetic source')
         return command(remote, 'rev-parse', 'HEAD')
     def update(**kwargs):
-        return updater.update_project(container, proxy=ProxyConfig('none'), **kwargs)
+        return updater.update_project(container, proxy=ProxyConfig('none'), emit=events.append, **kwargs)
     def preserved():
         assert (app / 'config/settings.json').read_bytes() == b'user-settings'
         assert (app / 'data/runtime/result.bin').read_bytes() == b'user-result'
@@ -94,7 +114,7 @@ def installation(tmp_path, monkeypatch):
     return locals()
 
 
-def test_forward_update_preserves_user_data_and_repeated_check_is_noop(installation):
+def test_forward_update_preserves_user_data_and_repeated_check_repairs_roles(installation):
     f = installation
     latest = f['newer']()
     result = f['update']()
@@ -103,10 +123,29 @@ def test_forward_update_preserves_user_data_and_repeated_check_is_noop(installat
     f['preserved']()
     receipt = json.loads((f['app'] / '.git/coating-installer-update.json').read_text(encoding='utf-8'))
     assert receipt['state'] == 'success' and receipt['new_commit'] == latest
-    assert f['planner'].call_args.args[5] == 'repair'
+    assert receipt['runtime_layout'] == 'managed_roles'
+    calls_before = len(f['calls'])
     second = f['update']()
     assert second['status'] == 'success' and second['up_to_date'] is True
-    f['execute'].assert_called_once()
+    assert second['source_changed'] is False and f['coordinator'].call_count == 2
+    assert not any('fetch' in call or 'checkout' in call for call in f['calls'][calls_before:])
+    f['preserved']()
+
+
+def test_update_passes_immutable_choices_to_shared_coordinator(installation):
+    f = installation
+    cancel = threading.Event()
+    result = f['update'](provider='github', mirror='pypi', backend='cuda13', development=True, cancel_event=cancel)
+    assert result['status'] == 'success' and result['up_to_date'] is True, result
+    kwargs = f['coordinator'].call_args.kwargs
+    assert kwargs['source'] == 'github' and kwargs['mirror'] == 'pypi'
+    assert kwargs['backend'] == 'cuda13' and kwargs['development'] is True
+    assert kwargs['cancel_event'] is cancel
+    assert result['runtime_roles'] == f['completion']['runtime_roles']
+    assert result['manifest'] == f['completion']['manifest']
+    assert result['compute_route']['backend_usable'] == {}
+    assert '未确认 GPU' in result['compute_route']['usable_backend']
+    assert not any(event.get('event') == 'completion' for event in f['events'])
     f['preserved']()
 
 
@@ -115,16 +154,18 @@ def test_main_commit_change_updates_even_when_version_text_unchanged(installatio
     latest = f['newer'](keep_version=True)
     result = f['update'](provider='github')
     assert result['status'] == 'success' and result['current_commit'] == latest
+    f['coordinator'].assert_called_once()
 
 
 def test_modified_tracked_source_stops_before_fetch(installation):
     f = installation
     f['newer']()
-    (f['app'] / 'source.py').write_text('user edit\n')
+    (f['app'] / 'source.py').write_text('user edit\n', encoding='utf-8')
     result = f['update']()
     assert result['status'] == 'failed' and '本地源码修改' in str(result['errors'])
     assert not any('fetch' in call for call in f['calls'])
-    assert (f['app'] / 'source.py').read_text(encoding="utf-8") == 'user edit\n'
+    assert (f['app'] / 'source.py').read_text(encoding='utf-8') == 'user edit\n'
+    f['coordinator'].assert_not_called()
     f['preserved']()
 
 
@@ -134,13 +175,14 @@ def test_ignored_user_file_collision_blocks_checkout(installation):
     result = f['update']()
     assert result['status'] == 'failed' and '冲突' in str(result['errors'])
     assert f['command'](f['app'], 'rev-parse', 'HEAD') == f['before']
+    f['coordinator'].assert_not_called()
     f['preserved']()
 
 
 def test_local_commits_are_never_reset_to_remote(installation):
     f = installation
     f['newer']()
-    (f['app'] / 'local.py').write_text('my local commit\n')
+    (f['app'] / 'local.py').write_text('my local commit\n', encoding='utf-8')
     f['command'](f['app'], 'add', 'local.py')
     f['command'](f['app'], 'commit', '--quiet', '-m', 'local work')
     local = f['command'](f['app'], 'rev-parse', 'HEAD')
@@ -148,83 +190,91 @@ def test_local_commits_are_never_reset_to_remote(installation):
     assert result['status'] == 'failed'
     assert f['command'](f['app'], 'rev-parse', 'HEAD') == local
     assert (f['app'] / 'local.py').exists()
+    assert not any('reset' in call or 'clean' in call or '--force' in call for call in f['calls'])
+    f['coordinator'].assert_not_called()
 
 
 @pytest.mark.parametrize('cancelled', [False, True])
-def test_dependency_failure_or_cancel_restores_old_source_under_lock(installation, cancelled):
+def test_coordinator_failure_or_cancel_restores_source_and_preserves_roles_for_retry(installation, cancelled):
     f = installation
-    f['newer']()
+    latest = f['newer']()
     cancel = threading.Event()
-    def fail(*args):
-        assert (f['container'] / '.app.coating-installer.lock').exists()
+    partial = f['app'] / '.runtime/envs/deposition-directml/partial.bin'
+    def fail(root, **kwargs):
+        assert root == f['container']
+        assert (root / '.app.coating-installer.lock').is_file()
+        partial.parent.mkdir(parents=True)
+        partial.write_bytes(b'prepared-role-for-retry')
+        kwargs['output']('test role dependency failure')
         if cancelled:
             cancel.set()
-        return {'status': 'cancelled' if cancelled else 'failed', 'errors': ['test dependency failure']}
-    f['execute'].side_effect = fail
+        return 130 if cancelled else 2
+    f['coordinator'].side_effect = fail
     result = f['update'](cancel_event=cancel)
     assert result['status'] == ('cancelled' if cancelled else 'failed')
     assert result['source_rolled_back'] is True
     assert f['command'](f['app'], 'rev-parse', 'HEAD') == f['before']
     assert f['command'](f['app'], 'rev-parse', '--abbrev-ref', 'HEAD') == 'main'
     assert not (f['container'] / '.app.coating-installer.lock').exists()
+    receipt = json.loads((f['app'] / '.git/coating-installer-update.json').read_text(encoding='utf-8'))
+    assert receipt['state'] == 'failed' and receipt['runtime_layout'] == 'managed_roles'
+    f['preserved']()
+    f['coordinator'].side_effect = f['install']
+    retry = f['update']()
+    assert retry['status'] == 'success' and retry['current_commit'] == latest, retry
+    assert partial.read_bytes() == b'prepared-role-for-retry'
     f['preserved']()
 
 
-def test_shortcut_failure_keeps_updated_source_and_reports_warning(installation):
+def test_coordinator_shortcut_failure_keeps_updated_source_and_reports_warning(installation):
     f = installation
     latest = f['newer']()
-    f['desktop'].return_value = {'status': 'failed', 'errors': ['桌面写入被拒绝']}
+    f['completion']['shortcut'] = {'status': 'failed', 'errors': ['桌面写入被拒绝']}
     result = f['update']()
-    # The verified source update and dependency transaction are retained: a
-    # noncritical shortcut failure returns success-with-warning, never a rollback.
+    # Shortcut work belongs to the coordinator. Its noncritical failure payload
+    # must retain the verified source/dependency transaction, never roll it back.
     assert result['status'] == 'success' and result['source_changed'] is True, result
     assert result['current_commit'] == latest
     assert 'source_rolled_back' not in result
-    assert result['shortcut']['status'] == 'failed'
+    assert result['shortcut'] == f['completion']['shortcut']
     assert any('桌面快捷方式未完成' in warning and '桌面写入被拒绝' in warning
                for warning in result['warnings'])
     assert f['command'](f['app'], 'rev-parse', 'HEAD') == latest
-    assert (f['app'] / 'source.py').read_text(encoding="utf-8") == 'value = 2\n'
-    assert f['execute'].call_count == 1
+    assert (f['app'] / 'source.py').read_text(encoding='utf-8') == 'value = 2\n'
+    f['coordinator'].assert_called_once()
     receipt = json.loads((f['app'] / '.git/coating-installer-update.json').read_text(encoding='utf-8'))
     assert receipt['state'] == 'success' and receipt['new_commit'] == latest
     assert receipt['shortcut_status'] == 'failed'
     f['preserved']()
 
 
-def test_already_current_update_with_shortcut_failure_stays_success_without_reinstall(installation):
+def test_same_head_repair_carries_coordinator_shortcut_failure_without_source_change(installation):
     f = installation
-    f['desktop'].return_value = {'status': 'failed', 'errors': ['桌面写入被拒绝']}
-    before = f['command'](f['app'], 'rev-parse', 'HEAD')
+    f['completion']['shortcut'] = {'status': 'failed', 'errors': ['桌面写入被拒绝']}
     result = f['update']()
-    # Source already current: no dependency transaction is re-run, no rollback,
-    # and the shortcut failure is a noncritical success-with-warning.
+    # Unchanged source still requires the shared role-repair coordinator. The
+    # coordinator's shortcut result stays noncritical and is not recreated here.
     assert result['status'] == 'success' and result['up_to_date'] is True
-    assert result['current_commit'] == before and result['source_changed'] is False
+    assert result['current_commit'] == f['before'] and result['source_changed'] is False
     assert 'source_rolled_back' not in result
-    assert result['shortcut']['status'] == 'failed'
+    assert result['shortcut'] == f['completion']['shortcut']
     assert any('桌面快捷方式未完成' in warning and '桌面写入被拒绝' in warning
                for warning in result['warnings'])
-    f['execute'].assert_not_called()
-    assert f['command'](f['app'], 'rev-parse', 'HEAD') == before
-    assert (f['app'] / 'source.py').read_text(encoding="utf-8") == 'value = 1\n'
+    f['coordinator'].assert_called_once()
+    assert not any('checkout' in call for call in f['calls'])
     receipt = json.loads((f['app'] / '.git/coating-installer-update.json').read_text(encoding='utf-8'))
     assert receipt['state'] == 'success' and receipt['shortcut_status'] == 'failed'
     f['preserved']()
 
 
-def test_cancellation_at_update_shortcut_post_step_keeps_verified_update(installation, monkeypatch):
+def test_late_cancellation_after_coordinator_completion_keeps_verified_update(installation, monkeypatch):
     f = installation
     latest = f['newer']()
     cancel = threading.Event()
-    shortcut = MagicMock()
-    monkeypatch.setattr(updater, 'ensure_desktop_shortcut', shortcut)
-    # Cancel exactly at the post-step: after the verified identity/version check,
-    # before the noncritical shortcut. read_text is called once for the old
-    # version and once for the verified current version.
+    # Cancel during the final version read, after coordinator completion and the
+    # source identity check. Its already-completed shortcut must not be repeated.
     real_read_text = Path.read_text
     seen = []
-
     def read_text(self, *args, **kwargs):
         text = real_read_text(self, *args, **kwargs)
         if self.name == 'version.txt':
@@ -232,53 +282,84 @@ def test_cancellation_at_update_shortcut_post_step_keeps_verified_update(install
             if len(seen) == 2:
                 cancel.set()
         return text
-
     monkeypatch.setattr(Path, 'read_text', read_text)
     result = f['update'](cancel_event=cancel)
-    # The verified update is committed: cancellation must not roll it back.
-    assert result['status'] == 'success'
-    assert result['current_commit'] == latest
+    assert cancel.is_set()
+    assert result['status'] == 'success' and result['current_commit'] == latest
     assert 'source_rolled_back' not in result
+    assert result['shortcut'] == f['completion']['shortcut']
     assert f['command'](f['app'], 'rev-parse', 'HEAD') == latest
-    assert (f['app'] / 'source.py').read_text(encoding="utf-8") == 'value = 2\n'
-    assert any('桌面快捷方式未完成' in warning for warning in result['warnings'])
-    shortcut.assert_not_called()
+    assert (f['app'] / 'source.py').read_text(encoding='utf-8') == 'value = 2\n'
+    f['coordinator'].assert_called_once()
     receipt = json.loads((f['app'] / '.git/coating-installer-update.json').read_text(encoding='utf-8'))
     assert receipt['state'] == 'success' and receipt['new_commit'] == latest
     f['preserved']()
 
 
-def test_raising_shortcut_is_noncritical_and_does_not_roll_back_update(installation):
+def test_coordinator_redacted_shortcut_failure_is_preserved_without_rollback(installation):
     f = installation
     latest = f['newer']()
-    # An unexpected ordinary Exception (e.g. an injected Windows API error) must
-    # not roll back the verified update: the boundary converts it to a redacted
-    # failed payload and the update still reports success-with-warning.
-    f['desktop'].side_effect = OSError('desktop API failed at https://user:pass@example.invalid/desktop')
+    # Exception handling/redaction lives at the shortcut coordinator boundary,
+    # not in the updater. Forward its completed payload without losing details.
+    f['completion']['shortcut'] = shortcuts.shortcut_failure(
+        OSError('desktop API failed at https://user:pass@example.invalid/desktop'), ProxyConfig('none'))
     result = f['update']()
     assert result['status'] == 'success' and result['source_changed'] is True
     assert result['current_commit'] == latest and 'source_rolled_back' not in result
-    assert result['shortcut']['status'] == 'failed'
-    error = "; ".join(result['shortcut']['errors'])
+    assert result['shortcut'] == f['completion']['shortcut']
+    error = '; '.join(result['shortcut']['errors'])
     assert 'OSError' in error and 'desktop API failed' in error
     assert 'example.invalid' in error and 'user:pass' not in error
     assert any('桌面快捷方式未完成' in warning for warning in result['warnings'])
-    assert f['command'](f['app'], 'rev-parse', 'HEAD') == latest
-    assert (f['app'] / 'source.py').read_text(encoding="utf-8") == 'value = 2\n'
-    assert f['execute'].call_count == 1
+    f['coordinator'].assert_called_once()
     receipt = json.loads((f['app'] / '.git/coating-installer-update.json').read_text(encoding='utf-8'))
     assert receipt['state'] == 'success' and receipt['new_commit'] == latest
     assert receipt['shortcut_status'] == 'failed'
     f['preserved']()
 
 
-def test_shortcut_keyboard_interrupt_is_not_swallowed_by_update(installation):
+def test_coordinator_keyboard_interrupt_is_not_swallowed_by_update(installation):
     f = installation
     f['newer']()
-    f['desktop'].side_effect = KeyboardInterrupt
-    # BaseException is never converted into a shortcut failure by the boundary.
+    f['coordinator'].side_effect = KeyboardInterrupt
     with pytest.raises(KeyboardInterrupt):
         f['update']()
+    assert not (f['container'] / '.app.coating-installer.lock').exists()
+    f['preserved']()
+
+
+@pytest.mark.parametrize('layout', ['sibling-base', 'external-base', 'missing-config', 'system-site-packages'])
+def test_real_coordinator_rejects_unsupported_venv_before_runtime_planning(installation, monkeypatch, tmp_path, layout):
+    f = installation
+    f['newer']()
+    config = f['config']
+    outside = tmp_path / 'outside-python'
+    if layout in ('sibling-base', 'external-base'):
+        outside = f['container'] / '.runtime/python' if layout == 'sibling-base' else outside
+        outside.mkdir(parents=True)
+        (outside / 'keep').write_bytes(b'foreign-runtime-preserved')
+        config.write_text(f'home = {outside}\nexecutable = {outside / "python.exe"}\n'
+            'include-system-site-packages = false\n', encoding='utf-8')
+    elif layout == 'missing-config':
+        config.unlink()
+    else:
+        config.write_text(config.read_text(encoding='utf-8').replace('false', 'true'), encoding='utf-8')
+    original_config = config.read_bytes() if config.exists() else None
+    f['coordinator'].side_effect = f['real_install']
+    monkeypatch.setattr(updater.default_install.sys, 'platform', 'win32')
+    monkeypatch.setattr(updater.default_install, 'discover_git', lambda **kwargs: f['git'])
+    planner = MagicMock(side_effect=lambda *a, **k: pytest.fail('unsupported layout reached private runtime planner'))
+    monkeypatch.setattr(updater.default_install, 'plan_runtime', planner)
+    result = f['update']()
+    assert result['status'] == 'failed' and '新安装目录' in str(result['errors']), result
+    assert result['source_rolled_back'] is True
+    assert f['command'](f['app'], 'rev-parse', 'HEAD') == f['before']
+    assert (config.read_bytes() if config.exists() else None) == original_config
+    if layout in ('sibling-base', 'external-base'):
+        assert (outside / 'keep').read_bytes() == b'foreign-runtime-preserved'
+    f['coordinator'].assert_called_once()
+    planner.assert_not_called()
+    f['preserved']()
 
 
 def test_shared_operation_lock_blocks_duplicate_update(installation):
@@ -363,7 +444,7 @@ def test_modified_owned_shortcut_and_unknown_receipt_are_not_overwritten(desktop
     assert target.read_bytes() == b'user changed' and len(list(desktop.glob('*.lnk'))) == 1
     writer.assert_called_once()
     marker = root / '.git/coating-installer-desktop.json'
-    marker.write_text('{"unrelated":true}')
+    marker.write_text('{"unrelated":true}', encoding='utf-8')
     assert shortcuts.ensure_desktop_shortcut(root)['status'] == 'failed'
     assert marker.read_text(encoding="utf-8") == '{"unrelated":true}'
 
@@ -372,7 +453,7 @@ def test_assume_unchanged_source_cannot_be_silently_overwritten(installation):
     f = installation
     f["newer"]()
     f["command"](f["app"], "update-index", "--assume-unchanged", "source.py")
-    (f["app"] / "source.py").write_text("hidden local edit\n")
+    (f["app"] / "source.py").write_text("hidden local edit\n", encoding="utf-8")
     result = f["update"]()
     assert result["status"] == "failed" and "索引标记" in str(result["errors"])
     assert (f["app"] / "source.py").read_text(encoding="utf-8") == "hidden local edit\n"

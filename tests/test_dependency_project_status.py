@@ -49,6 +49,12 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(result["commit"], git("rev-parse", "HEAD"))
         self.assertFalse(result["dirty"])
         self.assertEqual(result["source"]["provider"], "cnb")
+        private = self.root / ".runtime/envs/appearance/Lib/site-packages"
+        private.mkdir(parents=True)
+        (private / "inert.dll").write_bytes(b"untracked runtime, not source")
+        (self.root / ".venv").mkdir()
+        (self.root / ".venv/inert.bin").write_bytes(b"untracked app runtime")
+        self.assertFalse(status.check_project(self.root)["dirty"])
         (self.root / "user-work.txt").write_text("preserve")
         self.assertTrue(status.check_project(self.root)["dirty"])
         self.assertEqual((self.root / ".git/index").read_bytes(), before)

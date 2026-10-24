@@ -170,10 +170,11 @@ def test_worker_uses_current_flow_snapshot_and_redacts_logs(window, monkeypatch,
         assert kwargs["prompt_fn"]("source") == "2"
         assert kwargs["prompt_fn"]("mirror") == "y"
         assert kwargs["prompt_fn"]("development") == "y"
+        assert kwargs["source"] == "github" and kwargs["development"] is True
         kwargs["output"]("https://user:secret@example.test/file?token=private")
         raise RuntimeError("failure from current backend")
 
-    monkeypatch.setattr(gui, "run_interactive", fake_flow)
+    monkeypatch.setattr(gui, "run_default_installation", fake_flow)
     app = gui.DependencyManagerWindow(window, tmp_path / "new-install")
     assert app.source.get() == "cnb"
     app.source.set("github")
@@ -199,7 +200,7 @@ def test_close_cancels_install_worker_without_confirmation(window, monkeypatch, 
         assert kwargs["cancel_event"].wait(3)
         return 130
 
-    monkeypatch.setattr(gui, "run_interactive", fake_flow)
+    monkeypatch.setattr(gui, "run_default_installation", fake_flow)
     app = gui.DependencyManagerWindow(window, tmp_path / "new-install")
     app.start()
     assert entered.wait(2)
@@ -235,7 +236,7 @@ def test_python_button_only_uses_runtime_transaction(window, monkeypatch, tmp_pa
         return {"status": "success", "python": "owned/python.exe"}
 
     monkeypatch.setattr(python_setup, "execute_runtime", execute)
-    monkeypatch.setattr(gui, "run_interactive", lambda *a, **k: pytest.fail("not the Python-only operation"))
+    monkeypatch.setattr(gui, "run_default_installation", lambda *a, **k: pytest.fail("not the Python-only operation"))
     app = gui.DependencyManagerWindow(window, tmp_path / "new-install")
     app.start("python")
     pump(window, lambda: app.confirmation is not None)
@@ -272,7 +273,7 @@ def test_click_install_retains_full_plan_without_confirmation(window, monkeypatc
         assert all(kwargs["prompt_fn"](key) == "y" for key in ("python", "git", "install"))
         return 0
 
-    monkeypatch.setattr(gui, "run_interactive", flow)
+    monkeypatch.setattr(gui, "run_default_installation", flow)
     app = gui.DependencyManagerWindow(window, tmp_path / "review")
     app.install_button.invoke()
     pump(window, lambda: not app.busy)
@@ -291,7 +292,7 @@ def test_close_waits_for_owned_worker_cleanup(window, monkeypatch, tmp_path):
         assert release.wait(3)
         return 130
 
-    monkeypatch.setattr(gui, "run_interactive", flow)
+    monkeypatch.setattr(gui, "run_default_installation", flow)
     app = gui.DependencyManagerWindow(window, tmp_path / "slow-cleanup")
     app.start()
     app.close()
@@ -426,57 +427,47 @@ def test_default_visible_controls_and_details_toggle(window, tmp_path):
     assert not (tmp_path / "simple").exists()
 
 
-def test_one_click_full_flow_failure_retry_and_nonempty_container(window, monkeypatch, tmp_path):
+def test_one_click_role_transaction_failure_retry_and_nonempty_container(window, monkeypatch, tmp_path):
     from unittest.mock import MagicMock
-
-    from tools.dependency_manager import interactive
 
     root = tmp_path / "nonempty"
     root.mkdir()
     sentinel = root / "my-data.txt"
     sentinel.write_bytes(b"must survive")
-    identity = {"valid": True, "executable": "/python", "python": "3.12.10"}
-    values = {
-        "plan_runtime": {"status": "ready", "action": "extract"},
-        "execute_runtime": {"status": "success", "python": "/python", "identity": identity},
-        "recommend_environment": {"status": "success", "selected_backend": "cpu"},
-        "discover_git": None,
-        "plan_git_runtime": {"status": "ready"},
-        "execute_git_runtime": {"status": "completed", "git": "/git"},
-        "plan_project_deployment": {"status": "ready"},
-        "execute_project_deployment": {"status": "success"},
-        "inspect_environment": {"target": identity},
-        "plan_launch_entries": {"status": "ready"},
-        "execute_launch_entries": {"status": "success"},
-        "ensure_desktop_shortcut": {"status": "success", "path": "isolated QA desktop"},
-    }
-    calls = {}
-    for name, value in values.items():
-        calls[name] = MagicMock(return_value=value)
-        monkeypatch.setattr(interactive, name, calls[name])
-    calls["execute_project_deployment"].side_effect = [
-        {"status": "failed", "errors": ["dependency network unavailable"]},
-        {"status": "success"},
-    ]
+
+    def failed(project, **kwargs):
+        assert all(kwargs["prompt_fn"](key) == "y" for key in ("python", "git", "install"))
+        kwargs["plan_fn"]({"operation": "runtime_roles_plan", "status": "ready",
+            "roles": ["app", "deposition_cpu", "deposition_directml", "deposition_cuda", "appearance"]})
+        kwargs["output"]("安装失败：role dependency network unavailable")
+        return 2
+
+    def succeeded(project, **kwargs):
+        kwargs["event_fn"]({"event": "completion", "operation": "install", "target": str(root / "app"),
+            "shortcut": {"status": "success"}})
+        return 0
+
+    transaction = MagicMock()
+    outcomes = iter((failed, succeeded))
+    transaction.side_effect = lambda *args, **kwargs: next(outcomes)(*args, **kwargs)
+    monkeypatch.setattr(gui, "run_default_installation", transaction)
     app = gui.DependencyManagerWindow(window, root)
     app.install_button.invoke()
     pump(window, lambda: not app.busy)
     assert app.last_code == 2 and app.confirmation is None
-    assert "dependency network unavailable" in app.log.get("1.0", "end")
+    assert "role dependency network unavailable" in app.log.get("1.0", "end")
+    assert "deposition_directml" in app.current_plan and "deposition_cuda" in app.current_plan
     assert sentinel.read_bytes() == b"must survive"
-    app.install_button.invoke()
+    app.retry_button.invoke()
     pump(window, lambda: not app.busy)
     assert app.last_code == 0 and app.confirmation is None
     assert sentinel.read_bytes() == b"must survive"
-    assert calls["execute_runtime"].call_args.args[1] is True
-    assert calls["execute_git_runtime"].call_args.args[1] is True
-    assert calls["execute_project_deployment"].call_args.kwargs["confirmed"] is True
-    plan = calls["plan_project_deployment"].call_args.kwargs
-    assert plan["source"] == "cnb" and plan["mirror"] == "tuna"
-    assert plan["profile"] == "runtime" and plan["groups"] == ("desktop", "appearance")
-    assert calls["plan_runtime"].call_args.kwargs["runtime_mirror"] is True
-    assert calls["plan_git_runtime"].call_args.kwargs["runtime_mirror"] is True
-    calls["execute_launch_entries"].assert_called_once()
+    assert transaction.call_count == 2
+    for call in transaction.call_args_list:
+        assert call.args == (root,)
+        assert call.kwargs["source"] == "cnb" and call.kwargs["mirror"] == "tuna"
+        assert call.kwargs["development"] is False and call.kwargs["backend"] is None
+        assert "pipeline" not in call.kwargs
     assert not app.busy and str(app.install_button.cget("state")) == "normal"
 
 
@@ -489,7 +480,7 @@ def test_one_click_cancel_without_any_confirmations(window, monkeypatch, tmp_pat
         assert kwargs["cancel_event"].wait(3)
         return 130
 
-    monkeypatch.setattr(gui, "run_interactive", flow)
+    monkeypatch.setattr(gui, "run_default_installation", flow)
     app = gui.DependencyManagerWindow(window, tmp_path / "cancel")
     app.install_button.invoke()
     assert entered.wait(2)
@@ -507,7 +498,7 @@ def test_backend_snapshot_reaches_install_flow(window, monkeypatch, tmp_path):
         received.append(kwargs["backend"])
         return 0
 
-    monkeypatch.setattr(gui, "run_interactive", flow)
+    monkeypatch.setattr(gui, "run_default_installation", flow)
     app = gui.DependencyManagerWindow(window, tmp_path / "backend")
     app.backend.set("cpu")
     app.install_button.invoke()
@@ -520,7 +511,8 @@ def test_live_progress_and_logs_are_automatic_and_speeds_clear_on_finish(window,
     entered, release = threading.Event(), threading.Event()
 
     def flow(project, **kwargs):
-        assert kwargs["pipeline"] is True
+        assert kwargs["source"] == "cnb"
+        assert kwargs["development"] is False
         kwargs["phase_fn"]("python")
         kwargs["event_fn"]({"component": "Python", "phase": "runtime_download", "download_bytes": 1024, "total_bytes": 4096})
         kwargs["output"]("[Python] test https://user:secret@example.test/path?token=private")
@@ -529,7 +521,7 @@ def test_live_progress_and_logs_are_automatic_and_speeds_clear_on_finish(window,
         kwargs["phase_fn"]("source")
         return 0
 
-    monkeypatch.setattr(gui, "run_interactive", flow)
+    monkeypatch.setattr(gui, "run_default_installation", flow)
     app = gui.DependencyManagerWindow(window, tmp_path / "progress")
     window.deiconify()
     window.update()
@@ -570,7 +562,7 @@ def test_cancel_ignores_queued_late_download_progress(window, monkeypatch, tmp_p
         entered.set()
         assert release.wait(3)
         return 130
-    monkeypatch.setattr(gui, "run_interactive", flow)
+    monkeypatch.setattr(gui, "run_default_installation", flow)
     app = gui.DependencyManagerWindow(window, tmp_path / "late-progress")
     app.start()
     assert entered.wait(2)
@@ -632,7 +624,7 @@ def test_success_banner_contains_target_shortcut_and_exit_closes(window, monkeyp
         kwargs["event_fn"]({"event": "completion", "operation": "install", "target": str(target),
                             "shortcut": {"status": "success", "reused": False}})
         return 0
-    monkeypatch.setattr(gui, "run_interactive", flow)
+    monkeypatch.setattr(gui, "run_default_installation", flow)
     app = gui.DependencyManagerWindow(window, tmp_path / "installed")
     window.deiconify()
     app.start()
@@ -669,7 +661,7 @@ def test_failure_retry_clears_terminal_state_and_can_succeed(window, monkeypatch
             raise ValueError("没有写入权限，请选择可写目录")
         kwargs["event_fn"]({"event": "completion", "target": str(project), "shortcut": {"status": "success"}})
         return 0
-    monkeypatch.setattr(gui, "run_interactive", flow)
+    monkeypatch.setattr(gui, "run_default_installation", flow)
     app = gui.DependencyManagerWindow(window, tmp_path / "retry")
     window.deiconify()
     app.start()
@@ -687,7 +679,7 @@ def test_shortcut_failure_is_noncritical_warning_and_cancel_still_wins(window, m
         kwargs["event_fn"]({"event": "completion", "target": str(project),
             "shortcut": {"status": "failed", "errors": ["Desktop is read-only"]}})
         return 0
-    monkeypatch.setattr(gui, "run_interactive", flow)
+    monkeypatch.setattr(gui, "run_default_installation", flow)
     app = gui.DependencyManagerWindow(window, tmp_path / "shortcut-failed")
     window.deiconify()
     app.start()
@@ -704,7 +696,7 @@ def test_shortcut_failure_is_noncritical_warning_and_cancel_still_wins(window, m
         kwargs["cancel_event"].set()
         kwargs["event_fn"]({"event": "completion", "shortcut": {"status": "success"}})
         return 0
-    monkeypatch.setattr(gui, "run_interactive", cancelled)
+    monkeypatch.setattr(gui, "run_default_installation", cancelled)
     app.start()
     pump(window, lambda: not app.busy)
     assert app.last_code == 130 and app.terminal_state == "cancelled" and "已取消" in app.result_title.get()
@@ -725,7 +717,7 @@ def test_shortcut_retry_only_recreates_shortcut_without_rerunning_install(
         kwargs["event_fn"]({"event": "completion", "operation": "install", "target": str(project),
             "shortcut": {"status": "failed", "errors": ["desktop blocked"]}})
         return 0
-    monkeypatch.setattr(gui, "run_interactive", flow)
+    monkeypatch.setattr(gui, "run_default_installation", flow)
     monkeypatch.setattr(gui, "update_project", lambda *a, **k: pytest.fail("shortcut retry must not update source"))
     shortcut = MagicMock(return_value=outcome)
     monkeypatch.setattr(gui, "ensure_desktop_shortcut", shortcut)
@@ -760,7 +752,7 @@ def test_project_update_shortcut_warning_retry_only_recreates_shortcut(window, m
                 "source_changed": True, "shortcut": {"status": "failed", "errors": ["desktop blocked"]},
                 "warnings": ["主项目已更新并保留；桌面快捷方式未完成：desktop blocked"]}
     monkeypatch.setattr(gui, "update_project", update)
-    monkeypatch.setattr(gui, "run_interactive", lambda *a, **k: pytest.fail("shortcut retry must not install"))
+    monkeypatch.setattr(gui, "run_default_installation", lambda *a, **k: pytest.fail("shortcut retry must not install"))
     shortcut = MagicMock(return_value={"status": "success", "path": "isolated/Coating Sim.lnk", "reused": False})
     monkeypatch.setattr(gui, "ensure_desktop_shortcut", shortcut)
     app = gui.DependencyManagerWindow(window, tmp_path / "update-retry")
@@ -792,7 +784,7 @@ def test_cancel_during_shortcut_retry_is_reported_without_rerunning_update(windo
         assert release.wait(3)
         return {"status": "success", "path": "isolated/Coating Sim.lnk", "reused": False}
     monkeypatch.setattr(gui, "ensure_desktop_shortcut", MagicMock(side_effect=shortcut))
-    monkeypatch.setattr(gui, "run_interactive", lambda *a, **k: pytest.fail("must not install"))
+    monkeypatch.setattr(gui, "run_default_installation", lambda *a, **k: pytest.fail("must not install"))
     updates = []
     def update(root, provider, **kwargs):
         updates.append((str(root), provider))
@@ -839,7 +831,7 @@ def test_auto_ui_request_route_and_completion_are_consistent(window, monkeypatch
                 "requested_backend": "auto", "planned_backend": "cpu", "usable_backend": "cpu",
                 "reason": "CUDA unavailable; base verified"}})
         return 0
-    monkeypatch.setattr(gui, "run_interactive", install)
+    monkeypatch.setattr(gui, "run_default_installation", install)
     app=gui.DependencyManagerWindow(window,tmp_path/"isolated")
     assert app.backend.get()=="auto"
     app.start()

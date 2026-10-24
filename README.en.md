@@ -6,6 +6,8 @@ A standalone online installer for the public [ii33/coating-sim](https://github.c
 
 ## alpha.12
 
+Unreleased development: the source GUI now uses the [source-first private-role coordinator](docs/default-private-install-contract.md). Published alpha.12 EXEs retain their released behavior. Local tests do not establish a new release, complete native dependency closure, or clean-Windows installation acceptance.
+
 Download `CoatingSimInstaller-v0.1.0-alpha.12-windows-x64.exe` and verify the matching `SHA256SUMS.txt`. The default target is the EXE's directory, or the entry script's directory when running from source. A typed or browsed target and an explicit `--project` take precedence. Source defaults to CNB, with GitHub available. Tsinghua TUNA PyPI is enabled by default; explicit choices and a saved reviewed project index take precedence. No global pip configuration is changed.
 
 After clicking Install, the installer extracts **CPython's official NuGet Python 3.12.10 x64** to `<target>/.runtime/python`. Only this private interpreter creates `<target>/app/.venv`. It does not discover/reuse system Python, run a Python EXE/MSI installer, or change registrations/PATH. Launch using `app/launch-coating.cmd`, which references the project venv only.
@@ -40,7 +42,7 @@ MinGit binary downloads use the Huawei Cloud mirror first when mirrors are enabl
 
 ## Changes through alpha.11
 
-alpha.12 adds optional source-CLI isolated runtime roles. These commands are not exposed by the current EXE entry or default GUI workflow. Complete native dependency closure and clean-machine application installation remain unverified. See [alpha.12 release notes](docs/releases/v0.1.0-alpha.12.md).
+Published alpha.12 adds optional source-CLI isolated runtime roles. These commands are not exposed by its EXE entry or default GUI workflow. Complete native dependency closure and clean-machine application installation remain unverified. See [alpha.12 release notes](docs/releases/v0.1.0-alpha.12.md).
 
 The compact default interface supports one-click installation with expandable details. Update checks and updates the main application from the selected source main branch. Successful installation creates and verifies the current user desktop shortcut; a shortcut failure does not fail the install/update, is shown as a visible warning, and can be retried on its own. Installation, update, already-current, failed and cancelled outcomes are explicit; Exit becomes available after cleanup.
 
