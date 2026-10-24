@@ -1,3 +1,9 @@
+## v0.1.0-alpha.11
+
+桌面快捷方式现使用与应用任务栏重启标识一致的 `logolite.ico`。当图标路径或内容变化时，原子刷新已验证的安装器自有快捷方式；用户修改过的快捷方式和无关文件保持不变，并可恢复中断的刷新。Windows 回执测试显式按 UTF-8 读取，避免受系统默认编码影响。
+
+发布工作流将在上传前运行完整测试、构建 Windows x64 单文件 EXE，并检查 PE 产品版本、冻结自检、原生 GUI 启动及离线子进程。未完成全运行时安装验收，不宣称全流程安装通过。未签名的 alpha 预发布版；使用前请核对同一 Release 中的 `SHA256SUMS.txt`。
+
 ## v0.1.0-alpha.10
 
 The Windows GUI installer now starts Python, pip, Git and cleanup subprocesses without opening console windows. Exit codes and diagnostic output remain visible in the installer. The default installation target is the EXE's own directory (the entry script's directory when running from source); an explicit target or GUI selection takes precedence.

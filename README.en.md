@@ -4,9 +4,9 @@
 
 A standalone online installer for the public [ii33/coating-sim](https://github.com/ii33/coating-sim) project. The frozen installer's Python/Tcl/Tk is separate from the application runtime. Opening the EXE needs no preinstalled Python.
 
-## alpha.10
+## alpha.11
 
-Download `CoatingSimInstaller-v0.1.0-alpha.10-windows-x64.exe` and verify the matching `SHA256SUMS.txt`. The default target is the EXE's directory, or the entry script's directory when running from source. A typed or browsed target and an explicit `--project` take precedence. Source defaults to CNB, with GitHub available. Tsinghua TUNA PyPI is enabled by default; explicit choices and a saved reviewed project index take precedence. No global pip configuration is changed.
+Download `CoatingSimInstaller-v0.1.0-alpha.11-windows-x64.exe` and verify the matching `SHA256SUMS.txt`. The default target is the EXE's directory, or the entry script's directory when running from source. A typed or browsed target and an explicit `--project` take precedence. Source defaults to CNB, with GitHub available. Tsinghua TUNA PyPI is enabled by default; explicit choices and a saved reviewed project index take precedence. No global pip configuration is changed.
 
 After clicking Install, the installer extracts **CPython's official NuGet Python 3.12.10 x64** to `<target>/.runtime/python`. Only this private interpreter creates `<target>/app/.venv`. It does not discover/reuse system Python, run a Python EXE/MSI installer, or change registrations/PATH. Launch using `app/launch-coating.cmd`, which references the project venv only.
 
@@ -38,10 +38,12 @@ python -m PyInstaller --noconfirm --clean installer.spec
 
 MinGit binary downloads use the Huawei Cloud mirror first when mirrors are enabled, with official GitHub fallback. Both sources must match the same pinned official SHA-256. Choosing PyPI disables this mirror too. Project source selection is unchanged.
 
-## Changes through alpha.10
+## Changes through alpha.11
 
 The compact default interface supports one-click installation with expandable details. Update checks and updates the main application from the selected source main branch. Successful installation creates and verifies the current user desktop shortcut; a shortcut failure does not fail the install/update, is shown as a visible warning, and can be retried on its own. Installation, update, already-current, failed and cancelled outcomes are explicit; Exit becomes available after cleanup.
 
 Git software itself (MinGit) defaults to the Huawei Cloud mirror with verified official fallback, independently of the CNB/GitHub project-source selection.
+
+Desktop shortcuts now use `logolite.ico`, matching the application taskbar relaunch identity. Verified installer-owned shortcuts refresh atomically when the icon path or bytes change, while modified and unrelated links are preserved. Windows receipt tests now read UTF-8 fixtures explicitly.
 
 [Performance evidence](docs/installation-performance.md) · [Application updates and desktop shortcuts](docs/project-update-and-desktop.md) · [Completion and exit](docs/terminal-outcomes.md)

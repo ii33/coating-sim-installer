@@ -4,9 +4,9 @@
 
 独立在线安装器，为公开项目 [ii33/coating-sim](https://github.com/ii33/coating-sim) 部署源码、项目私有 Python、依赖和启动脚本。安装器自身的 Python/Tcl/Tk 与应用 Python 分开；双击 EXE 不要求预装 Python。
 
-## alpha.10 使用方式
+## alpha.11 使用方式
 
-1. 下载 `CoatingSimInstaller-v0.1.0-alpha.10-windows-x64.exe`，核对同一 Release 的 `SHA256SUMS.txt` 后启动。
+1. 下载 `CoatingSimInstaller-v0.1.0-alpha.11-windows-x64.exe`，核对同一 Release 的 `SHA256SUMS.txt` 后启动。
 2. 安装目录默认是 EXE 所在目录；从源码运行时默认是入口脚本所在目录。可以在界面输入或浏览另选目录，明确传入的 `--project` 也优先于默认值。选择源码来源（默认 CNB，可切换 GitHub）。清华 TUNA PyPI 默认启用；取消镜像加速使用官方源。已有项目记录的源及明确选择优先，不修改系统或用户全局 pip 配置。
 3. 确认计划后，安装器将 **CPython 官方 NuGet Python 3.12.10 x64** 解压到 `<目标>/.runtime/python`，只用该解释器创建 `<目标>/app/.venv`。不扫描或复用系统 Python，不运行 Python EXE/MSI，不改注册或 PATH。
 4. 完成依赖安装和安装后检查后，用生成的 `app/launch-coating.cmd` 启动；该脚本只使用项目 `.venv`。已有资源、未知运行时和不属于项目私有 Python 的旧环境均保留，需要另选目录。
@@ -41,10 +41,12 @@ python -m PyInstaller --noconfirm --clean installer.spec
 
 MinGit binary downloads use the Huawei Cloud mirror first when mirrors are enabled, with official GitHub fallback. Both sources must match the same pinned official SHA-256. Choosing PyPI disables this mirror too. Project source selection is unchanged.
 
-## alpha.10 更新
+## alpha.11 更新
 
 默认界面提供安装路径和一键安装，详细设置可展开。更新按钮检查并更新所选源的主程序 main；安装成功后创建并验证当前用户的桌面快捷方式，快捷方式失败不影响安装/更新结果，会显示醒目警告并可单独重试创建。完成、已是最新版、失败和取消均显示明确结果，清理结束后可直接退出安装器。
 
 Git 软件本体的 MinGit 下载默认优先使用华为云镜像，失败时回退官方源；两者校验同一固定 SHA256。此设置与项目源码 CNB/GitHub 的选择独立。
+
+桌面快捷方式与应用任务栏重启标识统一使用 `logolite.ico`；图标路径或内容变化时，原子刷新经验证的安装器自有快捷方式，并保留用户修改及无关快捷方式。Windows 回执测试显式使用 UTF-8，避免依赖系统默认编码。
 
 [安装性能与验证](docs/installation-performance.md) · [主程序更新与桌面快捷方式](docs/project-update-and-desktop.md) · [完成与退出状态](docs/terminal-outcomes.md)

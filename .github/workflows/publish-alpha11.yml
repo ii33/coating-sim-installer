@@ -1,0 +1,67 @@
+name: Publish alpha.11 installer
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-alpha11.yml']
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -r requirements-build.txt
+      - run: python -m pytest -q
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+      - run: python -m PyInstaller --noconfirm --clean installer.spec
+      - name: Verify frozen GUI, paths, and child processes
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path 'dist/CoatingSimInstaller-v0.1.0-alpha.11-windows-x64.exe').Path
+          $item = Get-Item $exe
+          if ($item.VersionInfo.ProductVersion -ne '0.1.0-alpha.11') { throw 'Wrong embedded version' }
+          $bytes = [IO.File]::ReadAllBytes($exe)
+          $subsystem = [BitConverter]::ToUInt16($bytes, [BitConverter]::ToInt32($bytes, 0x3c) + 24 + 68)
+          if ($subsystem -ne 2) { throw 'Installer is not a Windows GUI executable' }
+          $folder = Join-Path $env:RUNNER_TEMP '中文 空格 安装器'
+          New-Item -ItemType Directory -Path $folder -Force | Out-Null
+          $copied = Join-Path $folder $item.Name
+          Copy-Item $exe $copied
+          $report = Join-Path $env:RUNNER_TEMP 'installer-self-check.json'
+          $p = Start-Process $copied -WorkingDirectory $env:RUNNER_TEMP -ArgumentList ('--self-check --self-check-output "' + $report + '"') -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw 'Executable self-check failed' }
+          $result = Get-Content $report -Raw | ConvertFrom-Json
+          if ($result.status -ne 'success' -or !$result.frozen -or $result.default_project -ne $folder) { throw 'Wrong frozen default target' }
+          $guiReport = Join-Path $env:RUNNER_TEMP 'installer-gui-smoke.json'
+          $p = Start-Process $copied -WorkingDirectory $env:RUNNER_TEMP -ArgumentList ('--smoke-gui --self-check-output "' + $guiReport + '"') -PassThru -Wait
+          $gui = Get-Content $guiReport -Raw | ConvertFrom-Json
+          if ($p.ExitCode -ne 0 -or $gui.status -ne 'success' -or !$gui.visible -or $gui.project -ne $folder) { throw 'GUI smoke/default target failed' }
+          $venv = Join-Path $env:RUNNER_TEMP 'child process venv'
+          $venvReport = Join-Path $env:RUNNER_TEMP 'installer-venv-check.json'
+          $python = (Get-Command python).Source
+          $p = Start-Process $copied -WorkingDirectory $env:RUNNER_TEMP -ArgumentList ('--verify-venv "' + $venv + '" --python "' + $python + '" --self-check-output "' + $venvReport + '"') -PassThru -Wait
+          $checked = Get-Content $venvReport -Raw | ConvertFrom-Json
+          if ($p.ExitCode -ne 0 -or $checked.status -ne 'success' -or $checked.network_used -or $checked.packages_installed) { throw 'Offline child process check failed' }
+          $name = [IO.Path]::GetFileName($exe)
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText((Join-Path (Get-Location) 'dist/SHA256SUMS.txt'), "$hash  $name`n", [System.Text.UTF8Encoding]::new($false))
+      - name: Publish GitHub prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = 'v0.1.0-alpha.11'
+          $target = '${{ github.sha }}'
+          $notes = @(
+            '桌面快捷方式现使用与应用任务栏重启标识一致的 logolite.ico。图标路径或内容变化时，原子刷新已验证的安装器自有快捷方式；用户修改过的快捷方式和无关文件保持不变，并可恢复中断的刷新。'
+            'Windows 回执测试显式按 UTF-8 读取，避免受系统默认编码影响。'
+            '发布前运行完整测试并构建 Windows x64 单文件 EXE，随后检查 PE 产品版本、冻结自检、原生 GUI 启动及离线子进程。未完成全运行时安装验收，不宣称全流程安装通过。未签名的 alpha 预发布版；请核对 SHA256SUMS.txt。'
+          )
+          [IO.File]::WriteAllLines((Join-Path (Get-Location) 'dist/release-notes-alpha11.md'), $notes, [System.Text.UTF8Encoding]::new($false))
+          gh release create $tag dist/CoatingSimInstaller-v0.1.0-alpha.11-windows-x64.exe dist/SHA256SUMS.txt --repo ii33/coating-sim-installer --target $target --title 'v0.1.0-alpha.11' --notes-file dist/release-notes-alpha11.md --prerelease
