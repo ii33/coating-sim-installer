@@ -1,4 +1,5 @@
 """Offline launch-entry contracts. No user desktop writes or application start."""
+import hashlib
 import json
 import os
 import subprocess
@@ -81,6 +82,8 @@ class LaunchEntryTests(unittest.TestCase):
             known.assert_called_once_with('desktop')
             self.assertTrue(plan['files'][1]['path'].endswith('.lnk'))
             self.assertEqual(plan['icon'], str(self.root / launchers.ICON_RELATIVE))
+            self.assertTrue(plan['icon'].endswith('logolite.ico'))
+            self.assertEqual(plan['icon_sha256'], hashlib.sha256(b'original icon').hexdigest())
             self.assertIn('DisableDelayedExpansion', plan['script'])
             self.assertIn('pushd "%~dp0"', plan['script'])
             self.assertNotIn(str(self.root), plan['script'])

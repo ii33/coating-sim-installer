@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import shutil
@@ -308,19 +309,24 @@ def desktop_install(tmp_path, monkeypatch):
     (root / '.git').mkdir(parents=True)
     desktop = tmp_path / 'OneDrive' / '重定向桌面'
     desktop.mkdir(parents=True)
+    icon = root / 'coat_sim/ui/assets/icons/logolite.ico'
+    icon.parent.mkdir(parents=True)
+    icon.write_bytes(b'taskbar icon v1')
     base = {'status': 'ready', 'root': str(root), 'python': str(root / '.venv/Scripts/python.exe'),
-            'icon': str(root / 'coat_sim/ui/assets/icons/launcher.ico'), 'script': 'owned script'}
+            'icon': str(icon), 'icon_sha256': hashlib.sha256(icon.read_bytes()).hexdigest(),
+            'script': 'owned script'}
     monkeypatch.setattr(shortcuts.sys, 'platform', 'win32')
     monkeypatch.setattr(shortcuts.launchers, 'plan_launch_entries', lambda *a, **k: base)
     known = MagicMock(return_value=desktop)
     monkeypatch.setattr(shortcuts.launchers, '_known_folder', known)
-    writer = MagicMock(side_effect=lambda path, plan: path.write_bytes(b'fixture native link' * 10))
+    writer = MagicMock(side_effect=lambda path, plan: path.write_bytes(
+        (plan['icon'] + ':' + plan['icon_sha256']).encode().ljust(100, b'.')))
     monkeypatch.setattr(shortcuts.launchers, '_write_shortcut', writer)
-    return root, desktop, writer, known
+    return root, desktop, writer, known, base
 
 
 def test_redirected_desktop_shortcut_is_created_once_and_reused(desktop_install):
-    root, desktop, writer, known = desktop_install
+    root, desktop, writer, known, base = desktop_install
     result = shortcuts.ensure_desktop_shortcut(root)
     assert result['status'] == 'success', result
     original = Path(result['path']).read_bytes()
@@ -330,11 +336,13 @@ def test_redirected_desktop_shortcut_is_created_once_and_reused(desktop_install)
     assert Path(result['path']).read_bytes() == original and len(list(desktop.glob('*.lnk'))) == 1
     assert known.call_args.args == ('desktop',)
     plan = writer.call_args.args[1]
-    assert '.venv' in plan['python'] and plan['icon'].endswith('launcher.ico')
+    assert '.venv' in plan['python'] and plan['icon'].endswith('logolite.ico')
+    receipt = json.loads((root / '.git/coating-installer-desktop.json').read_text())
+    assert receipt['icon_sha256'] == base['icon_sha256']
 
 
 def test_unrelated_same_name_shortcut_uses_one_deterministic_alternate(desktop_install):
-    root, desktop, writer, known = desktop_install
+    root, desktop, writer, known, base = desktop_install
     primary = desktop / 'Coating Sim.lnk'
     primary.write_bytes(b'unrelated shortcut')
     first = shortcuts.ensure_desktop_shortcut(root)
@@ -346,12 +354,14 @@ def test_unrelated_same_name_shortcut_uses_one_deterministic_alternate(desktop_i
 
 
 def test_modified_owned_shortcut_and_unknown_receipt_are_not_overwritten(desktop_install):
-    root, desktop, writer, known = desktop_install
+    root, desktop, writer, known, base = desktop_install
     first = shortcuts.ensure_desktop_shortcut(root)
     target = Path(first['path'])
     target.write_bytes(b'user changed')
+    base['icon_sha256'] = 'icon-v2'
     assert shortcuts.ensure_desktop_shortcut(root)['status'] == 'failed'
     assert target.read_bytes() == b'user changed' and len(list(desktop.glob('*.lnk'))) == 1
+    writer.assert_called_once()
     marker = root / '.git/coating-installer-desktop.json'
     marker.write_text('{"unrelated":true}')
     assert shortcuts.ensure_desktop_shortcut(root)['status'] == 'failed'
@@ -370,7 +380,7 @@ def test_assume_unchanged_source_cannot_be_silently_overwritten(installation):
 
 
 def test_owned_shortcut_is_reused_after_desktop_redirect(desktop_install, tmp_path):
-    root, desktop, writer, known = desktop_install
+    root, desktop, writer, known, base = desktop_install
     first = shortcuts.ensure_desktop_shortcut(root)
     relocated = tmp_path / "新的 OneDrive 桌面"
     relocated.mkdir()
@@ -383,3 +393,132 @@ def test_owned_shortcut_is_reused_after_desktop_redirect(desktop_install, tmp_pa
     assert Path(second["path"]) == new_path
     assert len(list(relocated.glob("*.lnk"))) == 1
     writer.assert_called_once()
+
+
+def test_owned_shortcut_refreshes_when_application_icon_path_changes(desktop_install):
+    root, desktop, writer, known, base = desktop_install
+    # Simulate a receipt created by the prior installer, which selected launcher.ico.
+    old_icon = root / 'coat_sim/ui/assets/icons/launcher.ico'
+    old_icon.write_bytes(b'old launcher icon')
+    base['icon'] = str(old_icon)
+    base['icon_sha256'] = hashlib.sha256(old_icon.read_bytes()).hexdigest()
+    first = shortcuts.ensure_desktop_shortcut(root)
+    target = Path(first['path'])
+    old_data = target.read_bytes()
+
+    base['icon'] = str(root / 'coat_sim/ui/assets/icons/logolite.ico')
+    base['icon_sha256'] = hashlib.sha256(Path(base['icon']).read_bytes()).hexdigest()
+    refreshed = shortcuts.ensure_desktop_shortcut(root)
+    assert refreshed['status'] == 'success' and refreshed['reused'] is False
+    assert Path(refreshed['path']) == target and target.read_bytes() != old_data
+    receipt = json.loads((root / '.git/coating-installer-desktop.json').read_text())
+    assert receipt['icon'] == base['icon']
+    assert receipt['icon_sha256'] == base['icon_sha256']
+    assert writer.call_count == 2
+
+    reused = shortcuts.ensure_desktop_shortcut(root)
+    assert reused['status'] == 'success' and reused['reused'] is True
+    assert writer.call_count == 2 and len(list(desktop.glob('*.lnk'))) == 1
+
+
+def test_owned_shortcut_refreshes_when_same_icon_path_bytes_change(desktop_install):
+    root, desktop, writer, known, base = desktop_install
+    first = shortcuts.ensure_desktop_shortcut(root)
+    target = Path(first['path'])
+    old_data = target.read_bytes()
+
+    icon = Path(base['icon'])
+    icon.write_bytes(b'taskbar icon v2')
+    base['icon_sha256'] = hashlib.sha256(icon.read_bytes()).hexdigest()
+    refreshed = shortcuts.ensure_desktop_shortcut(root)
+    assert refreshed['status'] == 'success' and refreshed['reused'] is False
+    assert Path(refreshed['path']) == target and target.read_bytes() != old_data
+    receipt = json.loads((root / '.git/coating-installer-desktop.json').read_text())
+    assert receipt['icon'] == base['icon']
+    assert receipt['icon_sha256'] == base['icon_sha256']
+    assert writer.call_count == 2
+
+
+def test_shortcut_refresh_recovers_if_atomic_replace_fails(desktop_install, monkeypatch):
+    root, desktop, writer, known, base = desktop_install
+    first = shortcuts.ensure_desktop_shortcut(root)
+    target = Path(first['path'])
+    old_data = target.read_bytes()
+    icon = Path(base['icon'])
+    icon.write_bytes(b'taskbar icon v2')
+    base['icon_sha256'] = hashlib.sha256(icon.read_bytes()).hexdigest()
+    real_replace = shortcuts.os.replace
+
+    def fail_shortcut_replace(source, destination):
+        if Path(destination) == target:
+            raise OSError('replace blocked')
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(shortcuts.os, 'replace', fail_shortcut_replace)
+
+    failed = shortcuts.ensure_desktop_shortcut(root)
+    assert failed['status'] == 'failed'
+    assert target.read_bytes() == old_data
+    pending = json.loads((root / '.git/coating-installer-desktop.json').read_text())
+    assert pending['state'] == 'refreshing' and pending['previous_sha256']
+
+    monkeypatch.setattr(shortcuts.os, 'replace', real_replace)
+    recovered = shortcuts.ensure_desktop_shortcut(root)
+    assert recovered['status'] == 'success' and recovered['reused'] is False
+    assert target.read_bytes() != old_data
+    receipt = json.loads((root / '.git/coating-installer-desktop.json').read_text())
+    assert receipt['state'] == 'created' and 'previous_sha256' not in receipt
+    assert writer.call_count == 3
+
+
+def test_shortcut_refresh_recovers_if_receipt_finalization_fails(desktop_install, monkeypatch):
+    root, desktop, writer, known, base = desktop_install
+    first = shortcuts.ensure_desktop_shortcut(root)
+    target = Path(first['path'])
+    icon = Path(base['icon'])
+    icon.write_bytes(b'taskbar icon v2')
+    base['icon_sha256'] = hashlib.sha256(icon.read_bytes()).hexdigest()
+    save_record = shortcuts.save_record
+
+    def fail_created_receipt(path, data, **kwargs):
+        if data.get('state') == 'created' and data.get('icon_sha256') == base['icon_sha256']:
+            raise OSError('receipt finalization blocked')
+        return save_record(path, data, **kwargs)
+
+    monkeypatch.setattr(shortcuts, 'save_record', fail_created_receipt)
+    failed = shortcuts.ensure_desktop_shortcut(root)
+    assert failed['status'] == 'failed'
+    replacement_data = target.read_bytes()
+    pending = json.loads((root / '.git/coating-installer-desktop.json').read_text())
+    assert pending['state'] == 'refreshing' and 'previous_sha256' in pending
+
+    monkeypatch.setattr(shortcuts, 'save_record', save_record)
+    recovered = shortcuts.ensure_desktop_shortcut(root)
+    assert recovered['status'] == 'success' and recovered['reused'] is True
+    assert target.read_bytes() == replacement_data
+    receipt = json.loads((root / '.git/coating-installer-desktop.json').read_text())
+    assert receipt['state'] == 'created' and 'previous_sha256' not in receipt
+    assert writer.call_count == 2
+
+
+def test_shortcut_refresh_preserves_link_mutated_while_staging(desktop_install, monkeypatch):
+    root, desktop, writer, known, base = desktop_install
+    first = shortcuts.ensure_desktop_shortcut(root)
+    target = Path(first['path'])
+    user_data = b'user changed shortcut during icon refresh'
+    icon = Path(base['icon'])
+    icon.write_bytes(b'taskbar icon v2')
+    base['icon_sha256'] = hashlib.sha256(icon.read_bytes()).hexdigest()
+    real_write = shortcuts.launchers._write_shortcut
+
+    def mutate_then_stage(path, plan):
+        target.write_bytes(user_data)
+        return real_write(path, plan)
+
+    monkeypatch.setattr(shortcuts.launchers, '_write_shortcut', mutate_then_stage)
+    result = shortcuts.ensure_desktop_shortcut(root)
+    assert result['status'] == 'failed'
+    assert target.read_bytes() == user_data
+    receipt = json.loads((root / '.git/coating-installer-desktop.json').read_text())
+    assert receipt['state'] == 'created'
+    assert writer.call_count == 2

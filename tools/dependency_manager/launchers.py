@@ -19,7 +19,7 @@ from . import manager
 from .mirrors import redact
 from .windows_shell_link import create_and_verify
 
-ICON_RELATIVE = "coat_sim/ui/assets/icons/launcher.ico"
+ICON_RELATIVE = "coat_sim/ui/assets/icons/logolite.ico"
 
 
 def _digest(value):

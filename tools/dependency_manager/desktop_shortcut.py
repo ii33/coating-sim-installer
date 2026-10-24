@@ -53,6 +53,9 @@ def ensure_desktop_shortcut(root, *, desktop=None):
         primary = folder / "Coating Sim.lnk"
         alternate = folder / ("Coating Sim - " + hashlib.sha256(str(root).casefold().encode()).hexdigest()[:8] + ".lnk")
         destination = primary
+        owned_existing = False
+        previous_sha256 = None
+        arguments = subprocess.list2cmdline(["-E", str(root / "launcher.py")])
         if record is not None:
             destination = folder / Path(record["path"]).name
             if destination not in (primary, alternate):
@@ -60,17 +63,47 @@ def ensure_desktop_shortcut(root, *, desktop=None):
             if destination.exists():
                 if (not destination.is_file() or destination.is_symlink()
                         or destination.stat().st_size > 1024 * 1024
-                        or destination.resolve() != destination
-                        or hashlib.sha256(destination.read_bytes()).hexdigest() != record["sha256"]
-                        or record.get("python") != base["python"] or record.get("icon") != base["icon"]):
+                        or destination.resolve() != destination):
                     raise ValueError("已有桌面快捷方式被修改；已保留，请人工检查")
-                if record["path"] != str(destination):
-                    save_record(record_path, {**record, "path": str(destination)}, root=root, schema=SCHEMA)
-                return {**result, "status": "success", "path": str(destination), "reused": True}
+                actual_sha256 = hashlib.sha256(destination.read_bytes()).hexdigest()
+                if (record.get("state") not in ("prepared", "created", "refreshing")
+                        or record.get("python") != base["python"]
+                        or record.get("arguments") != arguments
+                        or record.get("working_directory") != str(root)):
+                    raise ValueError("已有桌面快捷方式记录不匹配；已保留，请人工检查")
+                if record.get("state") == "refreshing":
+                    if actual_sha256 == record.get("sha256"):
+                        # The atomic shortcut replacement completed before a prior
+                        # run could finalize its receipt. Complete that receipt.
+                        record = {key: value for key, value in record.items()
+                                  if key != "previous_sha256"}
+                        record.update({"path": str(destination), "state": "created"})
+                        save_record(record_path, record, root=root, schema=SCHEMA)
+                    elif actual_sha256 != record.get("previous_sha256"):
+                        raise ValueError("已有桌面快捷方式被修改；已保留，请人工检查")
+                elif actual_sha256 != record.get("sha256"):
+                    raise ValueError("已有桌面快捷方式被修改；已保留，请人工检查")
+                if actual_sha256 == record.get("sha256"):
+                    # A verified receipt proves the existing link is ours. Refresh
+                    # it in place only when its icon resource or bytes changed.
+                    owned_existing = True
+                    previous_sha256 = actual_sha256
+                    refresh_icon = (record.get("icon") != base["icon"]
+                                    or record.get("icon_sha256") != base.get("icon_sha256"))
+                    if not refresh_icon:
+                        if record["path"] != str(destination):
+                            save_record(record_path, {**record, "path": str(destination)},
+                                        root=root, schema=SCHEMA)
+                        return {**result, "status": "success", "path": str(destination), "reused": True}
+                else:
+                    # A pending refresh still has the previously verified link.
+                    # Rebuild it and retry the atomic replacement.
+                    owned_existing = True
+                    previous_sha256 = actual_sha256
         elif primary.exists():
             destination = alternate
             result["warnings"].append("保留已有同名快捷方式，使用此安装目录对应的独立名称")
-        if destination.exists() or destination.is_symlink():
+        if not owned_existing and (destination.exists() or destination.is_symlink()):
             raise ValueError("快捷方式名称已被其他文件占用；未覆盖：" + str(destination))
         with tempfile.TemporaryDirectory(prefix=".coating-shortcut-", dir=folder) as temporary:
             staged = Path(temporary) / "entry.lnk"
@@ -78,15 +111,30 @@ def ensure_desktop_shortcut(root, *, desktop=None):
             data = staged.read_bytes()
             receipt = {"path": str(destination), "sha256": hashlib.sha256(data).hexdigest(),
                        "python": base["python"], "icon": base["icon"],
-                       "arguments": subprocess.list2cmdline(["-E", str(root / "launcher.py")]),
+                       "icon_sha256": base.get("icon_sha256"),
+                       "arguments": arguments,
                        "working_directory": str(root), "state": "prepared"}
-            # A crash between record and publication can be retried without duplication.
-            save_record(record_path, receipt, root=root, schema=SCHEMA)
-            if os.name == "nt":
-                staged.rename(destination)
+            if owned_existing:
+                # Keep both hashes in the receipt across a crash around the atomic
+                # replacement. A retry can distinguish the old owned link, the new
+                # verified link, and a user-modified/unrelated file.
+                pending = {**receipt, "state": "refreshing", "previous_sha256": previous_sha256}
+                save_record(record_path, pending, root=root, schema=SCHEMA)
+                if (not destination.is_file() or destination.is_symlink()
+                        or hashlib.sha256(destination.read_bytes()).hexdigest() != previous_sha256):
+                    save_record(record_path, record, root=root, schema=SCHEMA)
+                    raise ValueError("已有桌面快捷方式在更新期间发生变化；已保留，请人工检查")
+                os.replace(staged, destination)
+                save_record(record_path, {**receipt, "state": "created"}, root=root, schema=SCHEMA)
             else:
-                os.link(staged, destination)
-            save_record(record_path, {**receipt, "state": "created"}, root=root, schema=SCHEMA)
+                # A crash between receipt and first publication can be retried
+                # without duplication; creation remains exclusive and no-clobber.
+                save_record(record_path, receipt, root=root, schema=SCHEMA)
+                if os.name == "nt":
+                    staged.rename(destination)
+                else:
+                    os.link(staged, destination)
+                save_record(record_path, {**receipt, "state": "created"}, root=root, schema=SCHEMA)
         return {**result, "status": "success", "path": str(destination), "reused": False}
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
         result["errors"].append(str(exc))
