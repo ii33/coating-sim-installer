@@ -55,6 +55,8 @@ def parser():
             "git-install",
             "runtime-plan",
             "runtime-install",
+            "runtime-roles-plan",
+            "runtime-roles-install",
             "launch-plan",
             "launch-create",
             "project-check",
@@ -87,6 +89,8 @@ def parser():
     )
     result.add_argument("--python", help="创建venv的正常CPython解释器路径；不使用冻结工具exe")
     result.add_argument("--runtime-dir", help="受管理CPython用户目录")
+    result.add_argument("--runtime-cuda", choices=("auto", "cpu", "cuda12", "cuda13"), default="auto",
+                        help="隔离运行环境：按硬件选择 CUDA；不会排除独立 DirectML 环境")
     result.add_argument(
         "--deployment-dir",
         help="project-plan/deploy：本项目 GitHub/CNB checkout；prepare 只接受新目录，依赖仅装到该目录/.venv",
@@ -130,7 +134,8 @@ def parser():
 
 
 def _print_human(result):
-    if result.get("operation") in ("launch_entries", "git_runtime_plan", "git_runtime_install"):
+    if result.get("operation") in ("launch_entries", "git_runtime_plan", "git_runtime_install",
+                                   "runtime_roles_plan", "runtime_roles_install"):
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
     dependency = result.get("dependency_plan") or result.get("dependency_result")
@@ -394,6 +399,15 @@ def main(argv=None):
                     proxy,
                 )
             )
+        elif args.operation in ("runtime-roles-plan", "runtime-roles-install"):
+            from .runtime_roles import execute_runtime_roles, plan_runtime_roles
+
+            if args.venv or args.python or args.runtime_dir:
+                raise ValueError("Isolated roles use only fixed project-private paths; Python/venv overrides are forbidden")
+            plan = plan_runtime_roles(args.project, cuda_backend=args.runtime_cuda,
+                                      profile=args.profile, mirror=args.mirror, proxy=proxy)
+            result = (plan if args.operation == "runtime-roles-plan" else execute_runtime_roles(
+                plan, args.yes and args.plan_id == plan.get("plan_id"), emit, cancel_event, proxy))
         elif args.operation.startswith("runtime-"):
             plan = plan_runtime(args.runtime_dir, args.backend, proxy, project=args.project,
                                 runtime_mirror=resolve_mirror(args.project, args.mirror) != "pypi")
