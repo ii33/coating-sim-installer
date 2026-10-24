@@ -124,7 +124,7 @@ def test_modified_tracked_source_stops_before_fetch(installation):
     result = f['update']()
     assert result['status'] == 'failed' and '本地源码修改' in str(result['errors'])
     assert not any('fetch' in call for call in f['calls'])
-    assert (f['app'] / 'source.py').read_text() == 'user edit\n'
+    assert (f['app'] / 'source.py').read_text(encoding="utf-8") == 'user edit\n'
     f['preserved']()
 
 
@@ -184,7 +184,7 @@ def test_shortcut_failure_keeps_updated_source_and_reports_warning(installation)
     assert any('桌面快捷方式未完成' in warning and '桌面写入被拒绝' in warning
                for warning in result['warnings'])
     assert f['command'](f['app'], 'rev-parse', 'HEAD') == latest
-    assert (f['app'] / 'source.py').read_text() == 'value = 2\n'
+    assert (f['app'] / 'source.py').read_text(encoding="utf-8") == 'value = 2\n'
     assert f['execute'].call_count == 1
     receipt = json.loads((f['app'] / '.git/coating-installer-update.json').read_text(encoding='utf-8'))
     assert receipt['state'] == 'success' and receipt['new_commit'] == latest
@@ -207,7 +207,7 @@ def test_already_current_update_with_shortcut_failure_stays_success_without_rein
                for warning in result['warnings'])
     f['execute'].assert_not_called()
     assert f['command'](f['app'], 'rev-parse', 'HEAD') == before
-    assert (f['app'] / 'source.py').read_text() == 'value = 1\n'
+    assert (f['app'] / 'source.py').read_text(encoding="utf-8") == 'value = 1\n'
     receipt = json.loads((f['app'] / '.git/coating-installer-update.json').read_text(encoding='utf-8'))
     assert receipt['state'] == 'success' and receipt['shortcut_status'] == 'failed'
     f['preserved']()
@@ -240,7 +240,7 @@ def test_cancellation_at_update_shortcut_post_step_keeps_verified_update(install
     assert result['current_commit'] == latest
     assert 'source_rolled_back' not in result
     assert f['command'](f['app'], 'rev-parse', 'HEAD') == latest
-    assert (f['app'] / 'source.py').read_text() == 'value = 2\n'
+    assert (f['app'] / 'source.py').read_text(encoding="utf-8") == 'value = 2\n'
     assert any('桌面快捷方式未完成' in warning for warning in result['warnings'])
     shortcut.assert_not_called()
     receipt = json.loads((f['app'] / '.git/coating-installer-update.json').read_text(encoding='utf-8'))
@@ -264,7 +264,7 @@ def test_raising_shortcut_is_noncritical_and_does_not_roll_back_update(installat
     assert 'example.invalid' in error and 'user:pass' not in error
     assert any('桌面快捷方式未完成' in warning for warning in result['warnings'])
     assert f['command'](f['app'], 'rev-parse', 'HEAD') == latest
-    assert (f['app'] / 'source.py').read_text() == 'value = 2\n'
+    assert (f['app'] / 'source.py').read_text(encoding="utf-8") == 'value = 2\n'
     assert f['execute'].call_count == 1
     receipt = json.loads((f['app'] / '.git/coating-installer-update.json').read_text(encoding='utf-8'))
     assert receipt['state'] == 'success' and receipt['new_commit'] == latest
@@ -337,7 +337,7 @@ def test_redirected_desktop_shortcut_is_created_once_and_reused(desktop_install)
     assert known.call_args.args == ('desktop',)
     plan = writer.call_args.args[1]
     assert '.venv' in plan['python'] and plan['icon'].endswith('logolite.ico')
-    receipt = json.loads((root / '.git/coating-installer-desktop.json').read_text())
+    receipt = json.loads((root / '.git/coating-installer-desktop.json').read_text(encoding="utf-8"))
     assert receipt['icon_sha256'] == base['icon_sha256']
 
 
@@ -365,7 +365,7 @@ def test_modified_owned_shortcut_and_unknown_receipt_are_not_overwritten(desktop
     marker = root / '.git/coating-installer-desktop.json'
     marker.write_text('{"unrelated":true}')
     assert shortcuts.ensure_desktop_shortcut(root)['status'] == 'failed'
-    assert marker.read_text() == '{"unrelated":true}'
+    assert marker.read_text(encoding="utf-8") == '{"unrelated":true}'
 
 
 def test_assume_unchanged_source_cannot_be_silently_overwritten(installation):
@@ -375,7 +375,7 @@ def test_assume_unchanged_source_cannot_be_silently_overwritten(installation):
     (f["app"] / "source.py").write_text("hidden local edit\n")
     result = f["update"]()
     assert result["status"] == "failed" and "索引标记" in str(result["errors"])
-    assert (f["app"] / "source.py").read_text() == "hidden local edit\n"
+    assert (f["app"] / "source.py").read_text(encoding="utf-8") == "hidden local edit\n"
     assert not any("fetch" in call for call in f["calls"])
 
 
@@ -411,7 +411,7 @@ def test_owned_shortcut_refreshes_when_application_icon_path_changes(desktop_ins
     refreshed = shortcuts.ensure_desktop_shortcut(root)
     assert refreshed['status'] == 'success' and refreshed['reused'] is False
     assert Path(refreshed['path']) == target and target.read_bytes() != old_data
-    receipt = json.loads((root / '.git/coating-installer-desktop.json').read_text())
+    receipt = json.loads((root / '.git/coating-installer-desktop.json').read_text(encoding="utf-8"))
     assert receipt['icon'] == base['icon']
     assert receipt['icon_sha256'] == base['icon_sha256']
     assert writer.call_count == 2
@@ -433,7 +433,7 @@ def test_owned_shortcut_refreshes_when_same_icon_path_bytes_change(desktop_insta
     refreshed = shortcuts.ensure_desktop_shortcut(root)
     assert refreshed['status'] == 'success' and refreshed['reused'] is False
     assert Path(refreshed['path']) == target and target.read_bytes() != old_data
-    receipt = json.loads((root / '.git/coating-installer-desktop.json').read_text())
+    receipt = json.loads((root / '.git/coating-installer-desktop.json').read_text(encoding="utf-8"))
     assert receipt['icon'] == base['icon']
     assert receipt['icon_sha256'] == base['icon_sha256']
     assert writer.call_count == 2
@@ -459,14 +459,14 @@ def test_shortcut_refresh_recovers_if_atomic_replace_fails(desktop_install, monk
     failed = shortcuts.ensure_desktop_shortcut(root)
     assert failed['status'] == 'failed'
     assert target.read_bytes() == old_data
-    pending = json.loads((root / '.git/coating-installer-desktop.json').read_text())
+    pending = json.loads((root / '.git/coating-installer-desktop.json').read_text(encoding="utf-8"))
     assert pending['state'] == 'refreshing' and pending['previous_sha256']
 
     monkeypatch.setattr(shortcuts.os, 'replace', real_replace)
     recovered = shortcuts.ensure_desktop_shortcut(root)
     assert recovered['status'] == 'success' and recovered['reused'] is False
     assert target.read_bytes() != old_data
-    receipt = json.loads((root / '.git/coating-installer-desktop.json').read_text())
+    receipt = json.loads((root / '.git/coating-installer-desktop.json').read_text(encoding="utf-8"))
     assert receipt['state'] == 'created' and 'previous_sha256' not in receipt
     assert writer.call_count == 3
 
@@ -489,14 +489,14 @@ def test_shortcut_refresh_recovers_if_receipt_finalization_fails(desktop_install
     failed = shortcuts.ensure_desktop_shortcut(root)
     assert failed['status'] == 'failed'
     replacement_data = target.read_bytes()
-    pending = json.loads((root / '.git/coating-installer-desktop.json').read_text())
+    pending = json.loads((root / '.git/coating-installer-desktop.json').read_text(encoding="utf-8"))
     assert pending['state'] == 'refreshing' and 'previous_sha256' in pending
 
     monkeypatch.setattr(shortcuts, 'save_record', save_record)
     recovered = shortcuts.ensure_desktop_shortcut(root)
     assert recovered['status'] == 'success' and recovered['reused'] is True
     assert target.read_bytes() == replacement_data
-    receipt = json.loads((root / '.git/coating-installer-desktop.json').read_text())
+    receipt = json.loads((root / '.git/coating-installer-desktop.json').read_text(encoding="utf-8"))
     assert receipt['state'] == 'created' and 'previous_sha256' not in receipt
     assert writer.call_count == 2
 
@@ -519,6 +519,6 @@ def test_shortcut_refresh_preserves_link_mutated_while_staging(desktop_install, 
     result = shortcuts.ensure_desktop_shortcut(root)
     assert result['status'] == 'failed'
     assert target.read_bytes() == user_data
-    receipt = json.loads((root / '.git/coating-installer-desktop.json').read_text())
+    receipt = json.loads((root / '.git/coating-installer-desktop.json').read_text(encoding="utf-8"))
     assert receipt['state'] == 'created'
     assert writer.call_count == 2
